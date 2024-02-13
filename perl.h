@@ -1253,8 +1253,10 @@ typedef enum {
 #  ifdef USE_POSIX_2008_LOCALE
     /* XXX experimentally use this undocumented GCC feature.  (Below also
      * checks for its availability before actually using it.) */
-#    ifndef USE_NL_LOCALE_NAME
-#      define USE_NL_LOCALE_NAME
+#    ifndef NO_NL_LOCALE_NAME
+#      ifndef USE_NL_LOCALE_NAME
+#        define USE_NL_LOCALE_NAME
+#      endif
 #    endif
 #    if  defined(HAS_QUERYLOCALE)                                           \
               /* Use querylocale if has it, or has the glibc internal       \
