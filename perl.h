@@ -6397,13 +6397,16 @@ EXTCONST U8   PL_deBruijn_bitpos_tab64[];
 #  define PERL_SET_THX(t)		NOOP
 #endif
 
+/* Create a reentrant lock mechanism.  Currently these are also
+ * many-readers/1-writer locks, simply because that's all that is so far needed
+ * */
 #ifdef WIN32
     /* Windows mutexes are all general semaphores; we don't currently bother
      * with reproducing the same panic behavior as on other systems */
 #  define PERL_REENTRANT_LOCK(name, mutex, counter,                         \
                               cond_to_panic_if_already_locked)              \
-        MUTEX_LOCK(mutex)
-#  define PERL_REENTRANT_UNLOCK(name, mutex, counter)  MUTEX_UNLOCK(mutex)
+        PERL_WRITE_LOCK(mutex)
+#  define PERL_REENTRANT_UNLOCK(name, mutex, counter)  PERL_WRITE_UNLOCK(mutex)
 #else
 
     /* Simulate a general (or recursive) semaphore on 'mutex' whose name will
@@ -6432,7 +6435,7 @@ EXTCONST U8   PL_deBruijn_bitpos_tab64[];
                                 "%s: %d: locking " name "; lock depth=1\n", \
                                 __FILE__, __LINE__));                       \
             )                                                               \
-            MUTEX_LOCK(mutex);                                         \
+            PERL_WRITE_LOCK(mutex);                                         \
             counter = 1;                                                    \
             UNLESS_PERL_MEM_LOG(DEBUG_Lv(PerlIO_printf(Perl_debug_log,      \
                                 "%s: %d: " name " locked; lock depth=1\n",  \
@@ -6465,7 +6468,7 @@ EXTCONST U8   PL_deBruijn_bitpos_tab64[];
                           __FILE__, __LINE__));                             \
             )                                                               \
             counter = 0;                                                    \
-            MUTEX_UNLOCK(mutex);                                       \
+            PERL_WRITE_UNLOCK(mutex);                                       \
         }                                                                   \
         else if (counter <= 0) {                                            \
             Perl_croak_nocontext("panic: %s: %d: attempting to unlock"      \
@@ -7399,6 +7402,7 @@ typedef struct am_table_short AMTS;
 #      define LOCALE_TERM_POSIX_2008_  NOOP
 #  else
      /* We have a locale object holding the 'C' locale for Posix 2008 */
+     /* We have a locale object holding the 'C' locale for Posix 2008 */
 #    define LOCALE_TERM_POSIX_2008_                                         \
                     STMT_START {                                            \
                         if (PL_C_locale_obj) {                              \
@@ -7410,11 +7414,11 @@ typedef struct am_table_short AMTS;
                         }                                                   \
                     } STMT_END
 #  endif
-
-#  define LOCALE_INIT           MUTEX_INIT(&PL_locale_mutex)
-#  define LOCALE_TERM           STMT_START {                                \
-                                    LOCALE_TERM_POSIX_2008_;                \
-                                    MUTEX_DESTROY(&PL_locale_mutex);        \
+#  define LOCALE_INIT           PERL_RW_MUTEX_INIT(&PL_locale_mutex)
+#  define LOCALE_TERM           STMT_START {                                  \
+                                    LOCALE_TERM_POSIX_2008_;                  \
+                                    LOCALE_TERM_THREAD_SAFE_LOCALE_EMULATION_;\
+                                    PERL_RW_MUTEX_DESTROY(&PL_locale_mutex);  \
                                 } STMT_END
 #  if 0
             /*dTHX;*/\
