@@ -7080,9 +7080,6 @@ typedef struct am_table_short AMTS;
 #if ! defined(USE_LOCALE_THREADS)   /* No threads, or no locales */ 
 #  define LOCALE_LOCK_(cond)  NOOP
 #  define LOCALE_UNLOCK_      NOOP
-#  define LOCALE_INIT
-#  define LOCALE_TERM
-
 #else   /* Below: Threaded, and locales are supported */
 
     /* A locale mutex is required on all such threaded builds for at least
@@ -7113,61 +7110,6 @@ typedef struct am_table_short AMTS;
                  LOCALE_LOCK_(cond_to_panic_if_already_locked)
 #      define LC_NUMERIC_UNLOCK  LOCALE_UNLOCK_
 #    endif
-#  endif
-
-#  ifdef WIN32_USE_FAKE_OLD_MINGW_LOCALES
-
-#  define _DISABLE_PER_THREAD_LOCALE 1
-#  define _ENABLE_PER_THREAD_LOCALE 2
-#  define configthreadlocale_(arg, na)                                      \
-     ({ assert(inRANGE(arg, 0, _ENABLE_PER_THREAD_LOCALE));                 \
-        const int old = na;                                                 \
-        if (arg != 0) na = arg;                                             \
-        old;                                                                \
-     })
-#  define _configthreadlocale(arg)  configthreadlocale_(arg, my_perl->Ina) \
-    /* This function is coerced by this Configure option into cleaning up
-     * memory that is static to locale.c.  So we call it at termination.  Doing
-     * it this way is kludgy but confines having to deal with this
-     * Configuration to a bare minimum number of places. */
-#      define LOCALE_TERM_POSIX_2008_  Perl_thread_locale_term(NULL)
-#  elif ! defined(USE_POSIX_2008_LOCALE)
-#      define LOCALE_TERM_POSIX_2008_  NOOP
-#  else
-     /* We have a locale object holding the 'C' locale for Posix 2008 */
-#    define LOCALE_TERM_POSIX_2008_                                         \
-                    STMT_START {                                            \
-                        if (PL_C_locale_obj) {                              \
-                            /* Make sure we aren't using the locale         \
-                             * space we are about to free */                \
-                            uselocale(LC_GLOBAL_LOCALE);                    \
-                            freelocale(PL_C_locale_obj);                    \
-                            PL_C_locale_obj = (locale_t) NULL;              \
-                        }                                                   \
-                    } STMT_END
-#  endif
-
-#  define LOCALE_INIT           MUTEX_INIT(&PL_locale_mutex)
-#  define LOCALE_TERM           STMT_START {                                \
-                                    LOCALE_TERM_POSIX_2008_;                \
-                                    MUTEX_DESTROY(&PL_locale_mutex);        \
-                                } STMT_END
-#  if 0
-            /*dTHX;*/\
-            LOCALE_TERM_POSIX_2008_;                                        \
-            /*{ char buf[1024];                                         \
-                    Size_t len = my_snprintf(buf, sizeof(buf),              \
-                                    "%s: %d: terminaing locale %p\n",       \
-                                    __FILE__, __LINE__, &PL_locale_mutex);  \
-                    PERL_UNUSED_RESULT(PerlLIO_write(2, buf, len));};*/       \
-            /*Perl_set_numeric_standard(aTHX);*/                            \
-            /*DEBUG_L( PerlIO_printf(Perl_debug_log,                           \
-                               "%s: %d: now standard=%p\n",                 \
-                               __FILE__, __LINE__, &PL_locale_mutex););*/      \
-            MUTEX_DESTROY(&PL_locale_mutex);                                \
-            /*DEBUG_L(PerlIO_printf(Perl_debug_log,                           \
-                               "%s: %dabout to destroy=%p\n",          \
-                                __FILE__, __LINE__, &PL_locale_mutex));*/
 #  endif
 #endif
 
@@ -7432,6 +7374,66 @@ typedef struct am_table_short AMTS;
 #define STRFMON_UNLOCK      LC_MONETARY_UNLOCK
 
 /* End of locale/env synchronization */
+
+#if ! defined(USE_LOCALE_THREADS)
+#  define LOCALE_INIT
+#  define LOCALE_TERM
+#else
+#  ifdef WIN32_USE_FAKE_OLD_MINGW_LOCALES
+
+#  define _DISABLE_PER_THREAD_LOCALE 1
+#  define _ENABLE_PER_THREAD_LOCALE 2
+#  define configthreadlocale_(arg, na)                                      \
+     ({ assert(inRANGE(arg, 0, _ENABLE_PER_THREAD_LOCALE));                 \
+        const int old = na;                                                 \
+        if (arg != 0) na = arg;                                             \
+        old;                                                                \
+     })
+#  define _configthreadlocale(arg)  configthreadlocale_(arg, my_perl->Ina) \
+    /* This function is coerced by this Configure option into cleaning up
+     * memory that is static to locale.c.  So we call it at termination.  Doing
+     * it this way is kludgy but confines having to deal with this
+     * Configuration to a bare minimum number of places. */
+#      define LOCALE_TERM_POSIX_2008_  Perl_thread_locale_term(NULL)
+#  elif ! defined(USE_POSIX_2008_LOCALE)
+#      define LOCALE_TERM_POSIX_2008_  NOOP
+#  else
+     /* We have a locale object holding the 'C' locale for Posix 2008 */
+#    define LOCALE_TERM_POSIX_2008_                                         \
+                    STMT_START {                                            \
+                        if (PL_C_locale_obj) {                              \
+                            /* Make sure we aren't using the locale         \
+                             * space we are about to free */                \
+                            uselocale(LC_GLOBAL_LOCALE);                    \
+                            freelocale(PL_C_locale_obj);                    \
+                            PL_C_locale_obj = (locale_t) NULL;              \
+                        }                                                   \
+                    } STMT_END
+#  endif
+
+#  define LOCALE_INIT           MUTEX_INIT(&PL_locale_mutex)
+#  define LOCALE_TERM           STMT_START {                                \
+                                    LOCALE_TERM_POSIX_2008_;                \
+                                    MUTEX_DESTROY(&PL_locale_mutex);        \
+                                } STMT_END
+#  if 0
+            /*dTHX;*/\
+            LOCALE_TERM_POSIX_2008_;                                        \
+            /*{ char buf[1024];                                         \
+                    Size_t len = my_snprintf(buf, sizeof(buf),              \
+                                    "%s: %d: terminaing locale %p\n",       \
+                                    __FILE__, __LINE__, &PL_locale_mutex);  \
+                    PERL_UNUSED_RESULT(PerlLIO_write(2, buf, len));};*/       \
+            /*Perl_set_numeric_standard(aTHX);*/                            \
+            /*DEBUG_L( PerlIO_printf(Perl_debug_log,                           \
+                               "%s: %d: now standard=%p\n",                 \
+                               __FILE__, __LINE__, &PL_locale_mutex););*/      \
+            MUTEX_DESTROY(&PL_locale_mutex);                                \
+            /*DEBUG_L(PerlIO_printf(Perl_debug_log,                           \
+                               "%s: %dabout to destroy=%p\n",          \
+                                __FILE__, __LINE__, &PL_locale_mutex));*/
+#  endif
+#endif
 
 #ifdef USE_LOCALE /* These locale things are all subject to change */
 
