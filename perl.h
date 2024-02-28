@@ -7045,8 +7045,13 @@ typedef struct am_table_short AMTS;
 #endif
 
 #ifdef USE_THREADS
-#  define ENV_LOCK            PERL_WRITE_LOCK(&PL_env_mutex)
-#  define ENV_UNLOCK          PERL_WRITE_UNLOCK(&PL_env_mutex)
+#  define ENV_LOCK            PERL_REENTRANT_LOCK("env",                    \
+                                                  &PL_env_mutex,            \
+                                                  PL_env_mutex_depth,       \
+                                                  1);
+#  define ENV_UNLOCK          PERL_REENTRANT_UNLOCK("env",                  \
+                                                    &PL_env_mutex,          \
+                                                    PL_env_mutex_depth)
 #  define CONVERT_ENV_READ_LOCK_TO_WRITE                                    \
                               PERL_CONVERT_READ_LOCK_TO_WRITE(&PL_env_mutex)
 #  define ENV_READ_LOCK       PERL_READ_LOCK(&PL_env_mutex)
@@ -7417,7 +7422,6 @@ typedef struct am_table_short AMTS;
 #  define LOCALE_INIT           PERL_RW_MUTEX_INIT(&PL_locale_mutex)
 #  define LOCALE_TERM           STMT_START {                                  \
                                     LOCALE_TERM_POSIX_2008_;                  \
-                                    LOCALE_TERM_THREAD_SAFE_LOCALE_EMULATION_;\
                                     PERL_RW_MUTEX_DESTROY(&PL_locale_mutex);  \
                                 } STMT_END
 #  if 0
