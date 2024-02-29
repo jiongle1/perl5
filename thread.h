@@ -312,12 +312,23 @@
         MUTEX_UNLOCK(&(mutex)->lock);                               \
     } STMT_END
 
-#  define PERL_WRITE_LOCK(mutex)                                    \
+#  define PERL_WRITE_LOCK(mutex)  PERL_WRITE_LOCK_(mutex, 0)
+
+/* The results are undefined if this is called without the caller actually
+ * having a read lock on mutex */
+#  define PERL_CONVERT_READ_LOCK_TO_WRITE(mutex)                    \
+                                          PERL_WRITE_LOCK_(mutex, 1)
+
+/* Base macro for the above two.  If COUNT is 0, is a plain write lock; no
+ * readers may be active before locking; when 1, locks when the reader COUNT
+ * goes down to 1, which it presumes means you are the sole reader */
+#  define PERL_WRITE_LOCK_(mutex, COUNT)                            \
     STMT_START {                                                    \
+        STATIC_ASSERT_DECL(COUNT == 0 || COUNT == 1);               \
         MUTEX_LOCK(&(mutex)->lock);                                 \
         do {                                                        \
-            if ((mutex)->readers_count <= 0) {                      \
-                assert((mutex)->readers_count == 0);                \
+            if ((mutex)->readers_count <= COUNT) {                  \
+                assert((mutex)->readers_count == COUNT);            \
                 (mutex)->readers_count = 0;                         \
                 break;                                              \
             }                                                       \
