@@ -314,9 +314,11 @@
 
 #  define PERL_WRITE_LOCK(mutex)  PERL_WRITE_LOCK_(mutex, 0)
 
-/* The results are undefined if this is called without the caller actually
- * having a read lock on mutex */
-#  define PERL_CONVERT_READ_LOCK_TO_WRITE(mutex)                    \
+/* Don't call this unless you have exactly one active read lock on 'mutex'.  If
+ * you have nested read-locks, the thread will hang; if you don't have any lock
+ * at all, the resuls are undefined but pretty much guaranteed to be
+ * undesirable. */
+#  define PERL_CONVERT_UNNESTED_READ_LOCK_TO_WRITE(mutex)               \
                                           PERL_WRITE_LOCK_(mutex, 1)
 
 /* Base macro for the above two.  If COUNT is 0, is a plain write lock; no

@@ -1140,6 +1140,12 @@ perl_destruct(pTHXx)
         PL_curlocales[i] = NULL;
     }
 #endif
+#if defined(EMULATE_THREAD_SAFE_LOCALES)
+    for (i = 0; i < (int) C_ARRAY_LENGTH(PL_restore_locale); i++) {
+        Safefree(PL_restore_locale[i]);
+        PL_restore_locale[i] = NULL;
+    }
+#endif
 #if defined(USE_POSIX_2008_LOCALE) && defined(MULTIPLICITY)
     {
         /* This also makes sure we aren't using a locale object that gets freed
@@ -1700,7 +1706,7 @@ dup_environ(pTHX)
 
     new_environ[n_entries] = NULL;
 
-    //CONVERT_ENV_READ_LOCK_TO_WRITE;
+    //CONVERT_UNNESTED_ENV_READ_LOCK_TO_WRITE;
     environ = new_environ;
     ENV_UNLOCK;
     /* Store a pointer in a global variable to ensure it's always reachable so

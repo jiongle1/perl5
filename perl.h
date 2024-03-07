@@ -59,9 +59,6 @@
 #  undef _UCRT
 #  ifndef NO_LOCALE
 #    define TS_W32_BROKEN_LOCALECONV
-#    ifdef USE_THREADS
-#      define EMULATE_THREAD_SAFE_LOCALES
-#    endif
 #  endif
 #endif
 
@@ -1285,8 +1282,11 @@ typedef enum {
 #  endif
 
    /* POSIX 2008 has no means of finding out the current locale without a
-    * querylocale; so must keep track of it ourselves */
-#  if (defined(USE_POSIX_2008_LOCALE) && ! defined(USE_QUERYLOCALE))
+    * querylocale; so must keep track of it ourselves.  And for thread-safe
+    * emulation, we keep track because the system doesn't have per-thread
+    * information */
+#  if (defined(USE_POSIX_2008_LOCALE) && ! defined(USE_QUERYLOCALE))        \
+   ||  defined(EMULATE_THREAD_SAFE_LOCALES)
 #    define USE_PL_CURLOCALES
 #  endif
 
@@ -6487,6 +6487,18 @@ EXTCONST U8   PL_deBruijn_bitpos_tab64[];
 
 #endif
 
+// if have a single counter
+//      if counter is 0, do normal lock, increment with both read and write
+//      else, we already have some sort of lock on this mutex:
+//          if it is a write lock, and we attempt a read, will hang, so
+//              we return with incremented counter.
+//          if it is a write lock, and we attempt a write, will hang, so
+//              we return with incremented counter.
+//          if it is a read lock, and we attempt a write, would hang, so
+//              we return with incremented counter.
+//          if it is a read lock, and we attempt a read, will work just fine
+//              ? we return with incremented counter.
+
 #ifndef EBCDIC
 
 /* The tables below are adapted from
@@ -7054,8 +7066,20 @@ typedef struct am_table_short AMTS;
                                                     PL_env_mutex_depth)
 #  define CONVERT_ENV_READ_LOCK_TO_WRITE                                    \
                               PERL_CONVERT_READ_LOCK_TO_WRITE(&PL_env_mutex)
+#  if 0
+#  define ENV_LOCK            PERL_REENTRANT_LOCK("env",                    \
+                                                  &PL_env_mutex,            \
+                                                  PL_env_mutex_depth,       \
+                                                  0);
+#  define ENV_UNLOCK          PERL_REENTRANT_UNLOCK("env",                  \
+                                                    &PL_env_mutex,          \
+                                                    PL_env_mutex_depth)
+#  endif
+#  define CONVERT_UNNESTED_ENV_READ_LOCK_TO_WRITE                           \
+                    PERL_CONVERT_UNNESTED_READ_LOCK_TO_WRITE(&PL_env_mutex)
 #  define ENV_READ_LOCK       PERL_READ_LOCK(&PL_env_mutex)
 #  define ENV_READ_UNLOCK     PERL_READ_UNLOCK(&PL_env_mutex)
+
 #  define ENV_INIT            PERL_RW_MUTEX_INIT(&PL_env_mutex)
 #  define ENV_TERM            PERL_RW_MUTEX_DESTROY(&PL_env_mutex)
 
@@ -7064,6 +7088,7 @@ typedef struct am_table_short AMTS;
     * time won't destroy ours before we have copied the result safely away and
     * unlocked the mutex.  On such platforms (which is most), we can have many
     * readers of the environment at the same time. */
+#if 0
 #  ifdef GETENV_PRESERVES_OTHER_THREAD
 #    define GETENV_LOCK    ENV_READ_LOCK
 #    define GETENV_UNLOCK  ENV_READ_UNLOCK
@@ -7073,6 +7098,7 @@ typedef struct am_table_short AMTS;
 #    define GETENV_LOCK    ENV_LOCK
 #    define GETENV_UNLOCK  ENV_UNLOCK
 #  endif
+#endif
 #else
 #  define ENV_LOCK        NOOP
 #  define ENV_UNLOCK      NOOP
@@ -7080,9 +7106,13 @@ typedef struct am_table_short AMTS;
 #  define ENV_READ_UNLOCK NOOP
 #  define ENV_INIT        NOOP
 #  define ENV_TERM        NOOP
-#  define GETENV_LOCK     NOOP
-#  define GETENV_UNLOCK   NOOP
+#  define CONVERT_UNNESTED_ENV_READ_LOCK_TO_WRITE NOOP
 #endif
+
+#define ENVw_LOCK_      ENV_LOCK
+#define ENVw_UNLOCK_    ENV_UNLOCK
+#define ENVr_LOCK_      ENV_READ_LOCK
+#define ENVr_UNLOCK_    ENV_READ_UNLOCK
 
 /* The POSIX Standard says:
  *
@@ -7138,306 +7168,163 @@ typedef struct am_table_short AMTS;
  * 2) above to use for each such combination.  These hide the details from the
  * caller; and if the code uses them exclusively this should prevent deadlock.
  * These always try to grab the environment mutex first; then the locale one.
-2008/functions/catopen.html env
-2008/functions/newlocale.html env prob. ""
  */
 
 /* Locale/thread synchronization macros. */
-#if ! defined(USE_LOCALE_THREADS)   /* No threads, or no locales */ 
-#  define LOCALE_LOCK_(cond)  NOOP
-#  define LOCALE_UNLOCK_      NOOP
-#else   /* Below: Threaded, and locales are supported */
+
+#ifndef USE_LOCALE_THREADS
+#  define LOCALE_LOCK_(cond_to_panic_if_already_locked)  NOOP
+#  define LOCALE_UNLOCK_          NOOP
+#  define LOCALE_READ_LOCK        NOOP
+#  define LOCALE_READ_UNLOCK      NOOP
+#  define ENVr_LCr_LOCK_(cat)     ENVr_LOCK_
+#  define ENVr_LCr_UNLOCK_(cat)   ENVr_UNLOCK_
+#  define ENVr_LCw_LOCK_(cat)     ENVr_LOCK_
+#  define ENVr_LCw_UNLOCK_(cat)   ENVr_UNLOCK_
+#  define gwENVr_LCr_LOCK_(cat)   ENVw_LOCK_
+#  define gwENVr_LCr_UNLOCK_(cat) ENVw_UNLOCK_
+#  define gwENVw_LCr_LOCK_(cat)   ENVw_LOCK_
+#  define gwENVw_LCr_UNLOCK_(cat) ENVw_UNLOCK_
+#  define gwLCr_LOCK_(cat)        ENVw_LOCK_
+#  define gwLCr_UNLOCK_(cat)      ENVw_UNLOCK_
+#  define LCr_LOCK_(cat)          NOOP
+#  define LCr_UNLOCK_(cat)        NOOP
+#  define TSE_TOGGLE_(cat)        NOOP
+#  define TSE_UNTOGGLE_(cat)      NOOP
+#  define LC_NUMERIC_LOCK(cond_to_panic_if_already_locked)  NOOP
+#  define LC_NUMERIC_UNLOCK       NOOP
+#  define LC_NUMERIC_LOCK(cond_to_panic_if_already_locked)  NOOP
+#else
 
     /* A locale mutex is required on all such threaded builds for at least
      * situations where there is a global static buffer.  This base lock that
      * handles these has a trailing underscore in the name */
 #  define LOCALE_LOCK_(cond_to_panic_if_already_locked)                     \
-       PERL_REENTRANT_LOCK("locale",                                        \
-                           &PL_locale_mutex, PL_locale_mutex_depth,         \
-                           cond_to_panic_if_already_locked)
+       STMT_START {                                                         \
+           PERL_REENTRANT_LOCK("locale",                                    \
+                               &PL_locale_mutex, PL_locale_mutex_depth,     \
+                               cond_to_panic_if_already_locked);            \
+       } STMT_END
 #  define LOCALE_UNLOCK_                                                    \
-       PERL_REENTRANT_UNLOCK("locale",                                      \
-                             &PL_locale_mutex, PL_locale_mutex_depth)
+       STMT_START {                                                         \
+           PERL_REENTRANT_UNLOCK("locale",                                  \
+                                 &PL_locale_mutex, PL_locale_mutex_depth);  \
+       } STMT_END
+
+#  define LOCALE_READ_LOCK    PERL_READ_LOCK(&PL_locale_mutex)
+#  define LOCALE_READ_UNLOCK  PERL_READ_UNLOCK(&PL_locale_mutex)
+
 #  ifdef USE_THREAD_SAFE_LOCALE
-    /* But for most situations, we use the macro name without a trailing
-     * underscore.
-     *
-     * In locale thread-safe Configurations, typical operations don't need
-     * locking */
-#    define LOCALE_LOCK         NOOP
-#    define LOCALE_UNLOCK       NOOP
+     /* Because any changes to the locale are for just this thread, no locking
+      * is necessary for it even if we are changing it, so anything not
+      * involving the environment is a no-op, and it plays no part in the
+      * environment portions */
+#    define ENVr_LCr_LOCK_(cat)     ENVr_LOCK_
+#    define ENVr_LCr_UNLOCK_(cat)   ENVr_UNLOCK_
+#    define ENVr_LCw_LOCK_(cat)     ENVr_LOCK_
+#    define ENVr_LCw_UNLOCK_(cat)   ENVr_UNLOCK_
+#    define gwENVr_LCr_LOCK_(cat)   ENVw_LOCK_
+#    define gwENVr_LCr_UNLOCK_(cat) ENVw_UNLOCK_
+#    define gwENVw_LCr_LOCK_(cat)   ENVw_LOCK_
+#    define gwENVw_LCr_UNLOCK_(cat) ENVw_UNLOCK_
+#    define gwLCr_LOCK_(cat)        ENVw_LOCK_
+#    define gwLCr_UNLOCK_(cat)      ENVw_UNLOCK_
+#    define LCr_LOCK_(cat)          NOOP
+#    define LCr_UNLOCK_(cat)        NOOP
+#    define TSE_TOGGLE_(cat)        NOOP
+#    define TSE_UNTOGGLE_(cat)      NOOP
+#    define LC_NUMERIC_LOCK(cond_to_panic_if_already_locked)  NOOP
+#    define LC_NUMERIC_UNLOCK       NOOP
+
+#  elif ! defined(EMULATE_THREAD_SAFE_LOCALES)
+#    define ENVr_LCr_LOCK_(cat)     STMT_START {                            \
+                                                 ENVr_LOCK_;                \
+                                                 LCr_LOCK_(cat);            \
+                                    } STMT_END
+#    define ENVr_LCr_UNLOCK_(cat)   STMT_START {                            \
+                                                 LCr_UNLOCK_(cat);          \
+                                                 ENVr_UNLOCK_;              \
+                                    } STMT_END
+#    define ENVr_LCw_LOCK_(cat)     STMT_START {                            \
+                                                 ENVr_LOCK_;                \
+                                                 LOCALE_LOCK_(0);           \
+                                    } STMT_END
+#    define ENVr_LCw_UNLOCK_(cat)   STMT_START {                            \
+                                                 LOCALE_UNLOCK_;            \
+                                                 ENVr_UNLOCK_;              \
+                                    } STMT_END
+#    define gwENVr_LCr_LOCK_(cat)   STMT_START {                            \
+                                                 ENVw_LOCK_;                \
+                                                 LCr_LOCK_(cat);            \
+                                    } STMT_END
+#    define gwENVr_LCr_UNLOCK_(cat) STMT_START {                            \
+                                                 LCr_UNLOCK_(cat);          \
+                                                 ENVw_UNLOCK_;              \
+                                    } STMT_END
+#    define gwENVw_LCr_LOCK_(cat)   gwENVr_LCr_LOCK_(cat)
+#    define gwENVw_LCr_UNLOCK_(cat) gwENVr_LCr_UNLOCK_(cat)
+#    define gwLCr_LOCK_(cat)        LOCALE_LOCK_(0)
+#    define gwLCr_UNLOCK_(cat)      LOCALE_UNLOCK_
+#    define LCr_LOCK_(cat)          LOCALE_READ_LOCK
+#    define LCr_UNLOCK_(cat)        LOCALE_READ_UNLOCK
+#    define TSE_TOGGLE_(cat)        NOOP
+#    define TSE_UNTOGGLE_(cat)      NOOP
+#    define LC_NUMERIC_LOCK(cond_to_panic_if_already_locked)                \
+               LOCALE_LOCK_(cond_to_panic_if_already_locked)
+#    define LC_NUMERIC_UNLOCK       LOCALE_UNLOCK_
+
 #  else
-     /* Whereas, thread-unsafe Configurations always requires locking */
-#    define LOCALE_LOCK_DOES_SOMETHING_
-#    define LOCALE_LOCK         LOCALE_LOCK_(0)
-#    define LOCALE_UNLOCK       LOCALE_UNLOCK_
-#    ifdef USE_LOCALE_NUMERIC
-#      define LC_NUMERIC_LOCK(cond_to_panic_if_already_locked)              \
-                 LOCALE_LOCK_(cond_to_panic_if_already_locked)
-#      define LC_NUMERIC_UNLOCK  LOCALE_UNLOCK_
-#    endif
+
+     /* Here, are emulating safe locales; everything has to be treated as a
+      * write lock, as everything is done in the global locale, so we can't
+      * have another thread changing it, and this thread may well have to
+      * toggle the locale */
+#    define ENVr_LCr_LOCK_(cat)     LOCK_i_(cat##_INDEX_)
+#    define ENVr_LCr_UNLOCK_(cat)   UNLOCK_i_(cat##_INDEX_)
+#    define ENVr_LCw_LOCK_(cat)     LOCK_i_(cat##_INDEX_)
+#    define ENVr_LCw_UNLOCK_(cat)   UNLOCK_i_(cat##_INDEX_)
+#    define gwENVr_LCr_LOCK_(cat)   LOCK_i_(cat##_INDEX_)
+#    define gwENVr_LCr_UNLOCK_(cat) UNLOCK_i_(cat##_INDEX_)
+#    define LCr_LOCK_(cat)          LOCK_i_(cat##_INDEX_)
+#    define LCr_UNLOCK_(cat)        UNLOCK_i_(cat##_INDEX_)
+#    define TSE_TOGGLE(cat)         LOCK_i_(cat##_INDEX_)
+#    define TSE_UNTOGGLE(cat)       UNLOCK_i_(cat##_INDEX_)
+#    define LC_NUMERIC_LOCK(cond_to_panic_if_already_locked)                \
+                                    LC_LOCK_i_(LC_NUMERIC_INDEX_)
+#    define LC_NUMERIC_UNLOCK       LC_UNLOCK_i_(LC_NUMERIC_INDEX_)
+
+#    define LC_LOCK_mask_(m)   category_lock(  m, __FILE__, __LINE__)
+#    define LC_UNLOCK_mask_(m) category_unlock(m, __FILE__, __LINE__)
+
+#    define LC_INDEX_TO_BIT_(i) (1 << (i))
+
+#    define LC_LOCK_i_(i)                                                   \
+        STMT_START {                                                        \
+                     ENVr_LOCK_;                                            \
+                     LC_LOCK_mask_(LC_INDEX_TO_BIT_(i));                    \
+        } STMT_END
+#    define LC_UNLOCK_i_(i)                                                 \
+        STMT_START {                                                        \
+                     LC_UNLOCK_mask_(LC_INDEX_TO_BIT_(i));                  \
+                     ENVr_UNLOCK_;                                          \
+        } STMT_END
 #  endif
 #endif
 
-/* There are some locale-related functions which may need locking only because
- * they share some common memory across threads, and hence there is the
- * potential for a race in accessing that space.  Most are because their return
- * points to a global static buffer, but some just use some common space
- * internally.  All functions accessing a given space need to have a critical
- * section to prevent any other thread from accessing it at the same time.
- * Ideally, there would be a separate mutex for each such space, so that
- * another thread isn't unnecessarily blocked.  But, most of them need to be
- * locked against the locale changing while accessing that space, and it is not
- * expected that any will be called frequently, and the locked interval should
- * be short, and modern platforms will have reentrant versions (which don't
- * lock) for almost all of them, so khw thinks a single mutex should suffice.
- * Having a single mutex facilitates that, avoiding potential deadlock
- * situations.
- *
- * This will be a no-op iff the perl is unthreaded. 'gw' stands for 'global
- * write', to indicate the caller wants to be able to access memory that isn't
- * thread specific, either to write to itself, or to prevent anyone else from
- * writing. */
-#define gwLOCALE_LOCK    LOCALE_LOCK_(0)
-#define gwLOCALE_UNLOCK  LOCALE_UNLOCK_
-
-/* Similar to gwLOCALE_LOCK, there are functions that require both the locale
- * and environment to be constant during their execution, and don't change
- * either of those things, but do write to some sort of shared global space.
- * They require some sort of exclusive lock against similar functions, and a
- * read lock on both the locale and environment.  However, on systems which
- * have per-thread locales, the locale is constant during the execution of
- * these functions, and so no locale lock is necssary.  For such systems, an
- * exclusive ENV lock is necessary and sufficient.  On systems where the locale
- * could change out from under us, we use an exclusive LOCALE lock to prevent
- * that, and a read ENV lock to prevent other threads that have nothing to do
- * with locales here from changing the environment. */
-#ifdef LOCALE_LOCK_DOES_SOMETHING
-#  define gwENVr_LOCALEr_LOCK                                               \
-                    STMT_START { LOCALE_LOCK; ENV_READ_LOCK; } STMT_END
-#  define gwENVr_LOCALEr_UNLOCK                                             \
-                STMT_START { ENV_READ_UNLOCK; LOCALE_UNLOCK; } STMT_END
-#else
-#  define gwENVr_LOCALEr_LOCK           ENV_LOCK
-#  define gwENVr_LOCALEr_UNLOCK         ENV_UNLOCK
-#endif
-
-      /* On systems that don't have per-thread locales, even though we don't
-       * think we are changing the locale ourselves, behind the scenes it does
-       * get changed to whatever the thread's should be, so it has to be an
-       * exclusive lock.  By defining it here with this name, we can, for the
-       * most part, hide this detail from the rest of the code */
-/* Currently, the read lock is an exclusive lock */
-#define LOCALE_READ_LOCK                LOCALE_LOCK
-#define LOCALE_READ_UNLOCK              LOCALE_UNLOCK
+#include "lock_definitions.h"
 
 /* setlocale() generally returns in a global static buffer, but not on Windows
  * when operating in thread-safe mode */
-#if defined(WIN32) && defined(USE_THREAD_SAFE_LOCALE)
-#  define POSIX_SETLOCALE_LOCK                                              \
+#define WSETLOCALE_LOCK                                                     \
             STMT_START {                                                    \
                 if (_configthreadlocale(0) == _DISABLE_PER_THREAD_LOCALE)   \
                     gwLOCALE_LOCK;                                          \
             } STMT_END
-#  define POSIX_SETLOCALE_UNLOCK                                            \
+#define WSETLOCALE_UNLOCK                                                   \
             STMT_START {                                                    \
                 if (_configthreadlocale(0) == _DISABLE_PER_THREAD_LOCALE)   \
                     gwLOCALE_UNLOCK;                                        \
             } STMT_END
-#else
-#  define POSIX_SETLOCALE_LOCK      gwLOCALE_LOCK
-#  define POSIX_SETLOCALE_UNLOCK    gwLOCALE_UNLOCK
-#endif
-
-/* It handles _wsetlocale() as well */
-#define WSETLOCALE_LOCK      POSIX_SETLOCALE_LOCK
-#define WSETLOCALE_UNLOCK    POSIX_SETLOCALE_UNLOCK
-
-
-#ifndef LC_NUMERIC_LOCK
-#  define LC_NUMERIC_LOCK(cond)   NOOP
-#  define LC_NUMERIC_UNLOCK       NOOP
-#endif
-
-   /* These non-reentrant versions use global space */
-#  define MBLEN_LOCK_                gwLOCALE_LOCK
-#  define MBLEN_UNLOCK_              gwLOCALE_UNLOCK
-
-#  define MBTOWC_LOCK_               gwLOCALE_LOCK
-#  define MBTOWC_UNLOCK_             gwLOCALE_UNLOCK
-
-#  define WCTOMB_LOCK_               gwLOCALE_LOCK
-#  define WCTOMB_UNLOCK_             gwLOCALE_UNLOCK
-
-   /* Whereas the reentrant versions don't (assuming they are called with a
-    * per-thread buffer; some have the capability of being called with a NULL
-    * parameter, which defeats the reentrancy) */
-#  define MBRLEN_LOCK_                  NOOP
-#  define MBRLEN_UNLOCK_                NOOP
-#  define MBRTOWC_LOCK_                 NOOP
-#  define MBRTOWC_UNLOCK_               NOOP
-#  define WCRTOMB_LOCK_                 NOOP
-#  define WCRTOMB_UNLOCK_               NOOP
-
-#  define LC_COLLATE_LOCK               LOCALE_LOCK
-#  define LC_COLLATE_UNLOCK             LOCALE_UNLOCK
-
-/* Some critical sections need to lock both the locale and the environment from
- * changing, while allowing for any number of readers.  To avoid deadlock, this
- * is always done in the same order.  These should always be invoked, like all
- * locks really, at such a low level that its just a libc call that is wrapped,
- * so as to prevent recursive calls which could deadlock. */
-#define ENVr_LOCALEr_LOCK                                               \
-            STMT_START { LOCALE_READ_LOCK; ENV_READ_LOCK; } STMT_END
-#define ENVr_LOCALEr_UNLOCK                                             \
-        STMT_START { ENV_READ_UNLOCK; LOCALE_READ_UNLOCK; } STMT_END
-
-#define STRFTIME_LOCK                   ENVr_LOCALEr_LOCK
-#define STRFTIME_UNLOCK                 ENVr_LOCALEr_UNLOCK
-
-/* These time-related functions all requre that the environment and locale
- * don't change while they are executing (at least in glibc; this appears to be
- * contrary to the POSIX standard).  tzset() writes global variables, so
- * always needs to have write locking.  ctime, localtime, mktime, and strftime
- * effectively call it, so they too need exclusive access.  The rest need to
- * have exclusive locking as well so that they can copy the contents of the
- * returned static buffer before releasing the lock.  That leaves asctime and
- * gmtime.  There may be reentrant versions of these available on the platform
- * which don't require write locking.
- */
-#ifdef PERL_REENTR_USING_ASCTIME_R
-#  define ASCTIME_LOCK     ENVr_LOCALEr_LOCK
-#  define ASCTIME_UNLOCK   ENVr_LOCALEr_UNLOCK
-#else
-#  define ASCTIME_LOCK     gwENVr_LOCALEr_LOCK
-#  define ASCTIME_UNLOCK   gwENVr_LOCALEr_UNLOCK
-#endif
-
-#define CTIME_LOCK         gwENVr_LOCALEr_LOCK
-#define CTIME_UNLOCK       gwENVr_LOCALEr_UNLOCK
-
-#ifdef PERL_REENTR_USING_GMTIME_R
-#  define GMTIME_LOCK      ENVr_LOCALEr_LOCK
-#  define GMTIME_UNLOCK    ENVr_LOCALEr_UNLOCK
-#else
-#  define GMTIME_LOCK      gwENVr_LOCALEr_LOCK
-#  define GMTIME_UNLOCK    gwENVr_LOCALEr_UNLOCK
-#endif
-
-#define LOCALTIME_LOCK     gwENVr_LOCALEr_LOCK
-#define LOCALTIME_UNLOCK   gwENVr_LOCALEr_UNLOCK
-#define MKTIME_LOCK        gwENVr_LOCALEr_LOCK
-#define MKTIME_UNLOCK      gwENVr_LOCALEr_UNLOCK
-#define TZSET_LOCK         gwENVr_LOCALEr_LOCK
-#define TZSET_UNLOCK       gwENVr_LOCALEr_UNLOCK
-
-/* Similiarly, these functions need a constant environment and/or locale.  And
- * some have a buffer that is shared with another thread executing the same or
- * a related call.  A mutex could be created for each class, but for now, share
- * the ENV mutex with everything, as none probably gets called so much that
- * performance would suffer by a thread being locked out by another thread that
- * could have used a different mutex.
- *
- * But, create a different macro name just to indicate the ones that don't
- * actually depend on the environment, but are using its mutex for want of a
- * better one */
-#define gwLOCALEr_LOCK              gwENVr_LOCALEr_LOCK
-#define gwLOCALEr_UNLOCK            gwENVr_LOCALEr_UNLOCK
-
-#ifdef PERL_REENTR_USING_GETHOSTBYADDR_R
-#  define GETHOSTBYADDR_LOCK        ENVr_LOCALEr_LOCK
-#  define GETHOSTBYADDR_UNLOCK      ENVr_LOCALEr_UNLOCK
-#else
-#  define GETHOSTBYADDR_LOCK        gwENVr_LOCALEr_LOCK
-#  define GETHOSTBYADDR_UNLOCK      gwENVr_LOCALEr_UNLOCK
-#endif
-#ifdef PERL_REENTR_USING_GETHOSTBYNAME_R
-#  define GETHOSTBYNAME_LOCK        ENVr_LOCALEr_LOCK
-#  define GETHOSTBYNAME_UNLOCK      ENVr_LOCALEr_UNLOCK
-#else
-#  define GETHOSTBYNAME_LOCK        gwENVr_LOCALEr_LOCK
-#  define GETHOSTBYNAME_UNLOCK      gwENVr_LOCALEr_UNLOCK
-#endif
-#ifdef PERL_REENTR_USING_GETNETBYADDR_R
-#  define GETNETBYADDR_LOCK         LOCALE_READ_LOCK
-#  define GETNETBYADDR_UNLOCK       LOCALE_READ_UNLOCK
-#else
-#  define GETNETBYADDR_LOCK         gwLOCALEr_LOCK
-#  define GETNETBYADDR_UNLOCK       gwLOCALEr_UNLOCK
-#endif
-#ifdef PERL_REENTR_USING_GETNETBYNAME_R
-#  define GETNETBYNAME_LOCK         LOCALE_READ_LOCK
-#  define GETNETBYNAME_UNLOCK       LOCALE_READ_UNLOCK
-#else
-#  define GETNETBYNAME_LOCK         gwLOCALEr_LOCK
-#  define GETNETBYNAME_UNLOCK       gwLOCALEr_UNLOCK
-#endif
-#ifdef PERL_REENTR_USING_GETPROTOBYNAME_R
-#  define GETPROTOBYNAME_LOCK       LOCALE_READ_LOCK
-#  define GETPROTOBYNAME_UNLOCK     LOCALE_READ_UNLOCK
-#else
-#  define GETPROTOBYNAME_LOCK       gwLOCALEr_LOCK
-#  define GETPROTOBYNAME_UNLOCK     gwLOCALEr_UNLOCK
-#endif
-#ifdef PERL_REENTR_USING_GETPROTOBYNUMBER_R
-#  define GETPROTOBYNUMBER_LOCK     LOCALE_READ_LOCK
-#  define GETPROTOBYNUMBER_UNLOCK   LOCALE_READ_UNLOCK
-#else
-#  define GETPROTOBYNUMBER_LOCK     gwLOCALEr_LOCK
-#  define GETPROTOBYNUMBER_UNLOCK   gwLOCALEr_UNLOCK
-#endif
-#ifdef PERL_REENTR_USING_GETPROTOENT_R
-#  define GETPROTOENT_LOCK          LOCALE_READ_LOCK
-#  define GETPROTOENT_UNLOCK        LOCALE_READ_UNLOCK
-#else
-#  define GETPROTOENT_LOCK          gwLOCALEr_LOCK
-#  define GETPROTOENT_UNLOCK        gwLOCALEr_UNLOCK
-#endif
-#ifdef PERL_REENTR_USING_GETPWNAM_R
-#  define GETPWNAM_LOCK             LOCALE_READ_LOCK
-#  define GETPWNAM_UNLOCK           LOCALE_READ_UNLOCK
-#else
-#  define GETPWNAM_LOCK             gwLOCALEr_LOCK
-#  define GETPWNAM_UNLOCK           gwLOCALEr_UNLOCK
-#endif
-#ifdef PERL_REENTR_USING_GETPWUID_R
-#  define GETPWUID_LOCK             LOCALE_READ_LOCK
-#  define GETPWUID_UNLOCK           LOCALE_READ_UNLOCK
-#else
-#  define GETPWUID_LOCK             gwLOCALEr_LOCK
-#  define GETPWUID_UNLOCK           gwLOCALEr_UNLOCK
-#endif
-#ifdef PERL_REENTR_USING_GETSERVBYNAME_R
-#  define GETSERVBYNAME_LOCK        LOCALE_READ_LOCK
-#  define GETSERVBYNAME_UNLOCK      LOCALE_READ_UNLOCK
-#else
-#  define GETSERVBYNAME_LOCK        gwLOCALEr_LOCK
-#  define GETSERVBYNAME_UNLOCK      gwLOCALEr_UNLOCK
-#endif
-#ifdef PERL_REENTR_USING_GETSERVBYPORT_R
-#  define GETSERVBYPORT_LOCK        LOCALE_READ_LOCK
-#  define GETSERVBYPORT_UNLOCK      LOCALE_READ_UNLOCK
-#else
-#  define GETSERVBYPORT_LOCK        gwLOCALEr_LOCK
-#  define GETSERVBYPORT_UNLOCK      gwLOCALEr_UNLOCK
-#endif
-#ifdef PERL_REENTR_USING_GETSERVENT_R
-#  define GETSERVENT_LOCK           LOCALE_READ_LOCK
-#  define GETSERVENT_UNLOCK         LOCALE_READ_UNLOCK
-#else
-#  define GETSERVENT_LOCK           gwLOCALEr_LOCK
-#  define GETSERVENT_UNLOCK         gwLOCALEr_UNLOCK
-#endif
-#ifdef PERL_REENTR_USING_GETSPNAM_R
-#  define GETSPNAM_LOCK             LOCALE_READ_LOCK
-#  define GETSPNAM_UNLOCK           LOCALE_READ_UNLOCK
-#else
-#  define GETSPNAM_LOCK             gwLOCALEr_LOCK
-#  define GETSPNAM_UNLOCK           gwLOCALEr_UNLOCK
-#endif
-
-#define STRFMON_LOCK        LC_MONETARY_LOCK
-#define STRFMON_UNLOCK      LC_MONETARY_UNLOCK
 
 /* End of locale/env synchronization */
 
@@ -7465,7 +7352,6 @@ typedef struct am_table_short AMTS;
 #      define LOCALE_TERM_POSIX_2008_  NOOP
 #  else
      /* We have a locale object holding the 'C' locale for Posix 2008 */
-     /* We have a locale object holding the 'C' locale for Posix 2008 */
 #    define LOCALE_TERM_POSIX_2008_                                         \
                     STMT_START {                                            \
                         if (PL_C_locale_obj) {                              \
@@ -7480,7 +7366,7 @@ typedef struct am_table_short AMTS;
 #  define LOCALE_INIT           PERL_RW_MUTEX_INIT(&PL_locale_mutex)
 #  define LOCALE_TERM           STMT_START {                                  \
                                     LOCALE_TERM_POSIX_2008_;                  \
-                                    LOCALE_TERM_THREAD_SAFE_LOCALE_EMULATION_;\
+                                    /*LOCALE_TERM_THREAD_SAFE_LOCALE_EMULATION_;*/\
                                     PERL_RW_MUTEX_DESTROY(&PL_locale_mutex);  \
                                 } STMT_END
 #  if 0
