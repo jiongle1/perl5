@@ -7084,6 +7084,637 @@ typedef struct am_table_short AMTS;
 #  define GETENV_UNLOCK   NOOP
 #endif
 
+/* The POSIX Standard says:
+ *
+ *    "... any function dependent on any environment variable is not thread-safe
+ *     if another thread is modifying the environment" 
+ *
+ * Linux glibc also requires the locale to be held constant for more than a few
+ * libc function calls.  This is not in the Standard, but khw thinks that may
+ * be mostly an oversight.  It makes sense in most such functions, that if the
+ * locale changed in the middle of executing it, an implementation could
+ * reasonably get confused.  This should be a problem, though, only if the
+ * locale is currently the global process-wide one.  A per-thread locale isn't
+ * changed by another thread, so there should be no race.
+ *
+ * Any process-wide changeable value, such as the environment, is potentially
+ * an issue for thread-safe access to it.  Neither the POSIX Standard nor the
+ * Linux man pages list any further common ones.  A likely candidate, though,
+ * is chdir():  https://stackoverflow.com/questions/78056645
+ *
+ * Perl takes the stance that other platforms follow POSIX and Linux.  Change
+ * the code if experience shows this to be wrong.  Too often, the vendor man
+ * pages omit such details.  POSIX has a list of the functions that are allowed
+ * to not be thread-safe: https://pubs.opengroup.org/onlinepubs/9699919799/
+ * Section 2.9.1 Thread-Safety.  This is unfortunately incomplete.  It doesn't
+ * include the ones that just access environment variables, for example.  Linux
+ * documents some more as well; some of those might just be documentating that
+ * the Linux implementation is non-compliant; or it might be it is an oversight
+ * in POSIX.
+ *
+ * Whenever there are multiple mutexes available, there is the possibility of
+ * deadlock where thread 1 holds mutex A, then requests B; and at the same time
+ * thread 2 holds B, then requests A.  This can't happen if the code is
+ * structured so that either:
+ *  1)  you never request A while holding B; or
+ *  2)  you never request B without first holding A.
+ *
+ * Note that if you hold a mutex for reading, and then try to acquire it for
+ * writing as well (without first releasing the read lock), you can get
+ * deadlock.  Perl assumes you don't do that.
+ *
+ * Given that restriction, note that even if you are acquiring 'B' for writing
+ * using strategy 2) above, the mutex for 'A'  above may be acquired just for
+ * reading if no writing related to it is to be done.  You may block when
+ * acquiring 'B', but no other thread will be blocked on 'A" while holding 'B'.
+ *
+ * The perl core does some of each strategy.  Most mutexes are acquired, the
+ * libc function is called, and the mutex immediately released.  Hence strategy
+ * 1) works for them.
+ *
+ * But the combination of both the locale and environment needing to be held
+ * constant occurs over and over in the Linux man pages, sometimes with one or
+ * the other also being written to.  There are macros that implement strategy
+ * 2) above to use for each such combination.  These hide the details from the
+ * caller; and if the code uses them exclusively this should prevent deadlock.
+ * These always try to grab the environment mutex first; then the locale one.
+2008/functions/catopen.html env
+2008/functions/newlocale.html env prob. ""
+
+#define SYSCONF_LOCK    ENV_READ_LOCK
+#define SYSCONF_UNLOCK  ENV_READ_UNLOCK
+       │l64a()    │ Thread safety │ MT-Unsafe race:l64a │
+       │asprintf(), vasprintf() │ Thread safety │ MT-Safe locale │
+       │atof()    │ Thread safety │ MT-Safe locale │
+       ├────────────────────────┼───────────────┼────────────────┤
+       │atoi(), atol(), atoll() │ Thread safety │ MT-Safe locale │
+       │bindresvport() │ Thread safety │ glibc >= 2.17: MT-Safe  │
+       │               │               │ glibc < 2.17: MT-Unsafe │
+       ├──────────┼───────────────┼─────────────────────┤
+       │catopen()  │ Thread safety │ MT-Safe env │
+       │cfree()   │ Thread safety │ MT-Safe // In glibc  │
+       ├──────────┼───────────────┼─────────────────────┤
+       │clearenv() │ Thread safety │ MT-Unsafe const:env │
+       ├──────────────────┼───────────────┼──────────────────────────────┤
+       │crypt              │ Thread safety │ MT-Unsafe race:crypt │
+       ├──────────────────┼───────────────┼──────────────────────────────┤
+       │crypt_gensalt     │ Thread safety │ MT-Unsafe race:crypt_gensalt │
+       │asctime()      │ Thread safety │ MT-Unsafe race:asctime locale   │
+       ├───────────────┼───────────────┼─────────────────────────────────┤
+       │asctime_r()    │ Thread safety │ MT-Safe locale                  │
+       ├───────────────┼───────────────┼─────────────────────────────────┤
+       │ctime()        │ Thread safety │ MT-Unsafe race:tmbuf            │
+       │               │               │ race:asctime env locale         │
+       ├───────────────┼───────────────┼─────────────────────────────────┤
+       │ctime_r(), gm‐ │ Thread safety │ MT-Safe env locale              │
+       │time_r(), lo‐  │               │                                 │
+       │caltime_r(),   │               │                                 │
+       │mktime()       │               │                                 │
+       ├───────────────┼───────────────┼─────────────────────────────────┤
+       │gmtime(), lo‐  │ Thread safety │ MT-Unsafe race:tmbuf env locale │
+       │caltime()      │               │                                 │
+       ├──────────────────────┼───────────────┼────────────────────────┤
+       │drand48(), erand48(), │ Thread safety │ MT-Unsafe race:drand48 │
+       │lrand48(), nrand48(), │               │                        │
+       │mrand48(), jrand48(), │               │                        │
+       │srand48(), seed48(),  │               │                        │
+       │lcong48()             │               │                        │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │drand48_r(), erand48_r(), │ Thread safety │ MT-Safe race:buffer │
+       │lrand48_r(), nrand48_r(), │               │                     │
+       │mrand48_r(), jrand48_r(), │               │                     │
+       │srand48_r(), seed48_r(),  │               │                     │
+       │lcong48_r()               │               │                     │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │ecvt()    │ Thread safety │ MT-Unsafe race:ecvt │
+       ├──────────┼───────────────┼─────────────────────┤
+       │fcvt()    │ Thread safety │ MT-Unsafe race:fcvt │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │encrypt(), setkey()     │ Thread safety │ MT-Unsafe race:crypt │
+       ├──────────────────┼───────────────┼────────────────┤
+       │err(), errx(),    │ Thread safety │ MT-Safe locale │
+       │warn(), warnx(),  │               │                │
+       │verr(), verrx(),  │               │                │
+       │vwarn(), vwarnx() │               │                │
+       ├────────────────┼───────────────┼───────────────────────────────────┤
+       │error()         │ Thread safety │ MT-Safe locale                    │
+       ├────────────────┼───────────────┼───────────────────────────────────┤
+       │error_at_line() │ Thread safety │ MT-Unsafe race: error_at_line/er‐ │
+       │                │               │ ror_one_per_line locale           │
+       ├──────────────────────────────────┼───────────────┼───────────┤
+       │ether_aton(), ether_ntoa()        │ Thread safety │ MT-Unsafe │
+       ├──────────────────────────────┼───────────────┼─────────────┤
+       │execlp(), execvp(), execvpe() │ Thread safety │ MT-Safe env │
+       ├──────────┼───────────────┼─────────────────────┤
+       │exit()    │ Thread safety │ MT-Unsafe race:exit │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │fcloseall() │ Thread safety │ MT-Unsafe race:streams │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │fgetgrent() │ Thread safety │ MT-Unsafe race:fgetgrent │
+       ├────────────┼───────────────┼──────────────────────────┤
+       │fgetpwent() │ Thread safety │ MT-Unsafe race:fgetpwent │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │fmtmsg()  │ Thread safety │ glibc >= 2.16: MT-Safe  │
+       │          │               │ glibc < 2.16: MT-Unsafe │
+       ├──────────┼───────────────┼────────────────────┤
+       │fnmatch() │ Thread safety │ MT-Safe env locale │
+       ├───────────┼───────────────┼─────────────────────┤
+       │__fpurge() │ Thread safety │ MT-Safe race:stream │
+       ├───────────────────────────────────┼───────────────┼───────────┤
+       │fts_read(), fts_children()         │ Thread safety │ MT-Unsafe │
+       ├──────────┼───────────────┼─────────────┤
+       │nftw()    │ Thread safety │ MT-Safe cwd │
+       ├────────────────────────────┼───────────────┼────────────────────────┤
+       │gamma(), gammaf(), gammal() │ Thread safety │ MT-Unsafe race:signgam │
+       ├────────────────┼───────────────┼────────────────────┤
+       │getaddrinfo()   │ Thread safety │ MT-Safe env locale │
+       ├───────────────────────────┼───────────────┼──────────────────┤
+       │getcontext(), setcontext() │ Thread safety │ MT-Safe race:ucp │
+       ├───────────────────────┼───────────────┼─────────────┤
+       │get_current_dir_name() │ Thread safety │ MT-Safe env │
+       ├────────────┼───────────────┼───────────────────────────────────┤
+       │getdate()   │ Thread safety │ MT-Unsafe race:getdate env locale │
+       ├────────────┼───────────────┼───────────────────────────────────┤
+       │getdate_r() │ Thread safety │ MT-Safe env locale                │
+       ├──────────────────────────┼───────────────┼─────────────┤
+       │getenv(), secure_getenv() │ Thread safety │ MT-Safe env │
+       ├─────────────┼───────────────┼─────────────────────────────┤
+       │endfsent(),  │ Thread safety │ MT-Unsafe race:fsent        │
+       │setfsent()   │               │                             │
+       ├─────────────┼───────────────┼─────────────────────────────┤
+       │getfsent(),  │ Thread safety │ MT-Unsafe race:fsent locale │
+       │getfsspec(), │               │                             │
+       │getfsfile()  │               │                             │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │getgrent()  │ Thread safety │ MT-Unsafe race:grent        │
+       │            │               │ race:grentbuf locale        │
+       ├────────────┼───────────────┼─────────────────────────────┤
+       │setgrent(), │ Thread safety │ MT-Unsafe race:grent locale │
+       │endgrent()  │               │                             │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │getgrent_r()  │ Thread safety │ MT-Unsafe race:grent locale │
+       ├──────────────┼───────────────┼─────────────────────────────┤
+       │getgrnam()    │ Thread safety │ MT-Unsafe race:grnam locale │
+       ├──────────────┼───────────────┼─────────────────────────────┤
+       │getgrgid()    │ Thread safety │ MT-Unsafe race:grgid locale │
+       ├──────────────┼───────────────┼─────────────────────────────┤
+       │getgrnam_r(), │ Thread safety │ MT-Safe locale              │
+       │getgrgid_r()  │               │                             │
+       ├───────────────┼───────────────┼────────────────┤
+       │getgrouplist() │ Thread safety │ MT-Safe locale │
+       ├───────────────────┼───────────────┼───────────────────────────────┤
+       │gethostbyname()    │ Thread safety │ MT-Unsafe race:hostbyname env │
+       │                   │               │ locale                        │
+       ├───────────────────┼───────────────┼───────────────────────────────┤
+       │gethostbyaddr()    │ Thread safety │ MT-Unsafe race:hostbyaddr env │
+       │                   │               │ locale                        │
+       ├───────────────────┼───────────────┼───────────────────────────────┤
+       │sethostent(),      │ Thread safety │ MT-Unsafe race:hostent env    │
+       │endhostent(),      │               │ locale                        │
+       │gethostent_r()     │               │                               │
+       ├───────────────────┼───────────────┼───────────────────────────────┤
+       │gethostent()       │ Thread safety │ MT-Unsafe race:hostent        │
+       │                   │               │ race:hostentbuf env locale    │
+       ├───────────────────┼───────────────┼───────────────────────────────┤
+       │gethostbyname2()   │ Thread safety │ MT-Unsafe race:hostbyname2    │
+       │                   │               │ env locale                    │
+       ├───────────────────┼───────────────┼───────────────────────────────┤
+       │gethostbyaddr_r(), │ Thread safety │ MT-Safe env locale            │
+       │gethostbyname_r(), │               │                               │
+       │gethostbyname2_r() │               │                               │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │gethostid() │ Thread safety │ MT-Safe hostid env locale │
+       ├────────────┼───────────────┼───────────────────────────┤
+       │sethostid() │ Thread safety │ MT-Unsafe const:hostid    │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │getlogin()   │ Thread safety │ MT-Unsafe race:getlogin race:utent    │
+       │             │               │ sig:ALRM timer locale                 │
+       ├─────────────┼───────────────┼───────────────────────────────────────┤
+       │getlogin_r() │ Thread safety │ MT-Unsafe race:utent sig:ALRM timer   │
+       │             │               │ locale                                │
+       ├─────────────┼───────────────┼───────────────────────────────────────┤
+       │cuserid()    │ Thread safety │ MT-Unsafe race:cuserid/!string locale │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │getmntent()   │ Thread safety │ MT-Unsafe race:mntentbuf locale │
+       ├──────────────┼───────────────┼─────────────────────────────────┤
+       │addmntent()   │ Thread safety │ MT-Safe race:stream locale      │
+       ├──────────────┼───────────────┼─────────────────────────────────┤
+       │getmntent_r() │ Thread safety │ MT-Safe locale                  │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │getnameinfo() │ Thread safety │ MT-Safe env locale │
+       ├───────────────┼───────────────┼───────────────────────────┤
+       │getnetent()    │ Thread safety │ MT-Unsafe race:netent     │
+       │               │               │ race:netentbuf env locale │
+       ├───────────────┼───────────────┼───────────────────────────┤
+       │getnetbyname() │ Thread safety │ MT-Unsafe race:netbyname  │
+       │               │               │ env locale                │
+       ├───────────────┼───────────────┼───────────────────────────┤
+       │getnetbyaddr() │ Thread safety │ MT-Unsafe race:netbyaddr  │
+       │               │               │ locale                    │
+       ├───────────────┼───────────────┼───────────────────────────┤
+       │setnetent(),   │ Thread safety │ MT-Unsafe race:netent env │
+       │endnetent()    │               │ locale                    │
+       ├──────────────────┼───────────────┼────────────────┤
+       │getnetent_r(),    │ Thread safety │ MT-Safe locale │
+       │getnetbyname_r(), │               │                │
+       │getnetbyaddr_r()  │               │                │
+       ├─────────────────────────┼───────────────┼───────────────────────────┤
+       │getopt(), getopt_long(), │ Thread safety │ MT-Unsafe race:getopt env │
+       │getopt_long_only()       │               │                           │
+       ├──────────┼───────────────┼────────────────┤
+       │getpass() │ Thread safety │ MT-Unsafe term │
+       ├───────────────────┼───────────────┼──────────────────────────────┤
+       │getprotoent()      │ Thread safety │ MT-Unsafe race:protoent      │
+       │                   │               │ race:protoentbuf locale      │
+       ├───────────────────┼───────────────┼──────────────────────────────┤
+       │getprotobyname()   │ Thread safety │ MT-Unsafe race:protobyname   │
+       │                   │               │ locale                       │
+       ├───────────────────┼───────────────┼──────────────────────────────┤
+       │getprotobynumber() │ Thread safety │ MT-Unsafe race:protobynumber │
+       │                   │               │ locale                       │
+       ├───────────────────┼───────────────┼──────────────────────────────┤
+       │setprotoent(),     │ Thread safety │ MT-Unsafe race:protoent      │
+       │endprotoent()      │               │ locale                       │
+       ├─────────────────────┼───────────────┼────────────────┤
+       │getprotoent_r(),     │ Thread safety │ MT-Safe locale │
+       │getprotobyname_r(),  │               │                │
+       │getprotobynumber_r() │               │                │
+       ├──────────┼───────────────┼────────────────┤
+       │getpw()   │ Thread safety │ MT-Safe locale │
+       ├────────────┼───────────────┼─────────────────────────────┤
+       │getpwent()  │ Thread safety │ MT-Unsafe race:pwent        │
+       │            │               │ race:pwentbuf locale        │
+       │setpwent(), │ Thread safety │ MT-Unsafe race:pwent locale │
+       │endpwent()  │               │                             │
+       ├──────────────┼───────────────┼─────────────────────────────┤
+       │getpwent_r()  │ Thread safety │ MT-Unsafe race:pwent locale │
+       ├──────────────┼───────────────┼─────────────────────────────┤
+       │getpwnam()    │ Thread safety │ MT-Unsafe race:pwnam locale │
+       ├──────────────┼───────────────┼─────────────────────────────┤
+       │getpwuid()    │ Thread safety │ MT-Unsafe race:pwuid locale │
+       ├──────────────┼───────────────┼─────────────────────────────┤
+       │getpwnam_r(), │ Thread safety │ MT-Safe locale              │
+       │getpwuid_r()  │               │                             │
+       ├─────────────────────────────┼───────────────┼────────────────┤
+       │getrpcent(), getrpcbyname(), │ Thread safety │ MT-Unsafe      │
+       │getrpcbynumber()             │               │                │
+       ├─────────────────────────────┼───────────────┼────────────────┤
+       │setrpcent(), endrpcent()     │ Thread safety │ MT-Safe locale │
+       ├────────────────────┼───────────────┼────────────────┤
+       │getrpcent_r(),      │ Thread safety │ MT-Safe locale │
+       │getrpcbyname_r(),   │               │                │
+       │getrpcbynumber_r()  │               │                │
+       ├─────────────┼───────────────┼────────────────────┤
+       │getrpcport() │ Thread safety │ MT-Safe env locale │
+       ├────────────────┼───────────────┼───────────────────────────┤
+       │getservent()    │ Thread safety │ MT-Unsafe race:servent    │
+       │                │               │ race:serventbuf locale    │
+       ├────────────────┼───────────────┼───────────────────────────┤
+       │getservbyname() │ Thread safety │ MT-Unsafe race:servbyname │
+       │                │               │ locale                    │
+       ├────────────────┼───────────────┼───────────────────────────┤
+       │getservbyport() │ Thread safety │ MT-Unsafe race:servbyport │
+       │                │               │ locale                    │
+       ├────────────────┼───────────────┼───────────────────────────┤
+       │setservent(),   │ Thread safety │ MT-Unsafe race:servent    │
+       │endservent()    │               │ locale                    │
+       ├───────────────────┼───────────────┼────────────────┤
+       │getservent_r(),    │ Thread safety │ MT-Safe locale │
+       │getservbyname_r(), │               │                │
+       │getservbyport_r()  │               │                │
+       ├──────────────┼───────────────┼────────────────────────────────┤
+       │getspnam()    │ Thread safety │ MT-Unsafe race:getspnam locale │
+       ├──────────────┼───────────────┼────────────────────────────────┤
+       │getspent()    │ Thread safety │ MT-Unsafe race:getspent        │
+       │              │               │ race:spentbuf locale           │
+       ├──────────────┼───────────────┼────────────────────────────────┤
+       │setspent(),   │ Thread safety │ MT-Unsafe race:getspent locale │
+       │endspent(),   │               │                                │
+       │getspent_r()  │               │                                │
+       ├──────────────┼───────────────┼────────────────────────────────┤
+       │fgetspent()   │ Thread safety │ MT-Unsafe race:fgetspent       │
+       ├──────────────┼───────────────┼────────────────────────────────┤
+       │sgetspent()   │ Thread safety │ MT-Unsafe race:sgetspent       │
+       ├──────────────┼───────────────┼────────────────────────────────┤
+       │putspent(),   │ Thread safety │ MT-Safe locale                 │
+       │getspnam_r(), │               │                                │
+       │sgetspent_r() │               │                                │
+       ├──────────────┼───────────────┼────────────────────────────────┤
+       │getttyent(), setttyent(), │ Thread safety │ MT-Unsafe race:ttyent │
+       │endttyent(), getttynam()  │               │                       │
+       ├────────────────────────────────┼───────────────┼───────────┤
+       │getusershell(), setusershell(), │ Thread safety │ MT-Unsafe │
+       │endusershell()                  │               │           │
+       ├────────────┼───────────────┼──────────────────────────────┤
+       │getutent()  │ Thread safety │ MT-Unsafe init race:utent    │
+       │            │               │ race:utentbuf sig:ALRM timer │
+       ├────────────┼───────────────┼──────────────────────────────┤
+       │getutid(),  │ Thread safety │ MT-Unsafe init race:utent    │
+       │getutline() │               │ sig:ALRM timer               │
+       ├────────────┼───────────────┼──────────────────────────────┤
+       │pututline() │ Thread safety │ MT-Unsafe race:utent         │
+       │            │               │ sig:ALRM timer               │
+       ├────────────┼───────────────┼──────────────────────────────┤
+       │setutent(), │ Thread safety │ MT-Unsafe race:utent         │
+       │endutent(), │               │                              │
+       │utmpname()  │               │                              │
+       ├───────────┼───────────────┼──────────────────────────┤
+       │glob()     │ Thread safety │ MT-Unsafe race:utent env │
+       │           │               │ sig:ALRM timer locale    │
+       ├───────────┼───────────────┼──────────────────────────┤
+       │grantpt() │ Thread safety │ MT-Safe locale │
+       ├──────────┼───────────────┼─────────────────┤
+       │ssignal() │ Thread safety │ MT-Safe sigintr │
+       ├──────────────────────────┼───────────────┼────────────────────────┤
+       │hcreate(), hsearch(),     │ Thread safety │ MT-Unsafe race:hsearch │
+       │hdestroy()                │               │                        │
+       ├──────────────────────────┼───────────────┼────────────────────────┤
+       │hcreate_r(), hsearch_r(), │ Thread safety │ MT-Safe race:htab      │
+       │hdestroy_r()              │               │                        │
+       ├──────────┼───────────────┼─────────────────┤
+       │iconv()   │ Thread safety │ MT-Safe race:cd │
+       ├─────────────┼───────────────┼────────────────┤
+       │iconv_open() │ Thread safety │ MT-Safe locale │
+       ├───────────────────────────────┼───────────────┼────────────────┤
+       │inet_aton(), inet_addr(),      │ Thread safety │ MT-Safe locale │
+       │inet_network(), inet_ntoa()    │               │                │
+       ├───────────────────────────────┼───────────────┼────────────────┤
+       │inet_ntop() │ Thread safety │ MT-Safe locale │
+       │inet_pton() │ Thread safety │ MT-Safe locale │
+       ├─────────────┼───────────────┼────────────────┤
+       │initgroups() │ Thread safety │ MT-Safe locale │
+       ├───────────┼───────────────┼────────────────┤
+       │iswalnum() │ Thread safety │ MT-Safe locale │
+       ├───────────┼───────────────┼────────────────┤
+       │iswalpha() │ Thread safety │ MT-Safe locale │
+       ├───────────┼───────────────┼────────────────┤
+       │iswblank() │ Thread safety │ MT-Safe locale │
+       ├───────────┼───────────────┼────────────────┤
+       │iswcntrl() │ Thread safety │ MT-Safe locale │
+       ├───────────┼───────────────┼────────────────┤
+       │iswdigit() │ Thread safety │ MT-Safe locale │
+       ├───────────┼───────────────┼────────────────┤
+       │iswgraph() │ Thread safety │ MT-Safe locale │
+       ├───────────┼───────────────┼────────────────┤
+       │iswlower() │ Thread safety │ MT-Safe locale │
+       ├───────────┼───────────────┼────────────────┤
+       │iswprint() │ Thread safety │ MT-Safe locale │
+       ├───────────┼───────────────┼────────────────┤
+       │iswpunct() │ Thread safety │ MT-Safe locale │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │iswspace() │ Thread safety │ MT-Safe locale │
+       ├───────────┼───────────────┼────────────────┤
+       │iswupper() │ Thread safety │ MT-Safe locale │
+       ├────────────┼───────────────┼────────────────┤
+       │iswxdigit() │ Thread safety │ MT-Safe locale │
+       ├─────────────┼───────────────┼──────────────────────────────────┤
+       │localeconv() │ Thread safety │ MT-Unsafe race:localeconv locale │
+       ├──────────┼───────────────┼──────────────────────┤
+       │login(),  │ Thread safety │ MT-Unsafe race:utent │
+       │logout()  │               │ sig:ALRM timer       │
+       ├──────────────┼───────────────┼────────────────────────────┤
+       │makecontext() │ Thread safety │ MT-Safe race:ucp           │
+       ├──────────────┼───────────────┼────────────────────────────┤
+       │swapcontext() │ Thread safety │ MT-Safe race:oucp race:ucp │
+       ├───────────┼───────────────┼──────────────────────────────┤
+       │mallinfo() │ Thread safety │ MT-Unsafe init const:mallopt │
+       ├──────────┼───────────────┼────────────────┤
+       │mblen()   │ Thread safety │ MT-Unsafe race │
+       ├──────────┼───────────────┼───────────────────────────┤
+       │mbrlen()  │ Thread safety │ MT-Unsafe race:mbrlen/!ps │
+       ├──────────┼───────────────┼────────────────────────────┤
+       │mbrtowc() │ Thread safety │ MT-Unsafe race:mbrtowc/!ps │
+       ├─────────────┼───────────────┼───────────────────────────────┤
+       │mbsnrtowcs() │ Thread safety │ MT-Unsafe race:mbsnrtowcs/!ps │
+       ├────────────┼───────────────┼──────────────────────────────┤
+       │mbsrtowcs() │ Thread safety │ MT-Unsafe race:mbsrtowcs/!ps │
+       ├──────────┼───────────────┼────────────────┤
+       │mbtowc()  │ Thread safety │ MT-Unsafe race │
+       ├─────────────────────────────┼───────────────┼───────────────────────┤
+       │mcheck(), mcheck_pedantic(), │ Thread safety │ MT-Unsafe race:mcheck │
+       │mcheck_check_all(), mprobe() │               │ const:malloc_hooks    │
+       ├─────────────────────┼───────────────┼───────────┤
+       │mtrace(), muntrace() │ Thread safety │ MT-Unsafe │
+       ├──────────────┼───────────────┼────────────────┤
+       │nl_langinfo() │ Thread safety │ MT-Safe locale │
+       ├─────────────────────┼───────────────┼────────────────────────┤
+       │forkpty(), openpty() │ Thread safety │ MT-Safe locale         │
+       ├─────────────────────┼───────────────┼────────────────────────┤
+       │login_tty()          │ Thread safety │ MT-Unsafe race:ttyname │
+       ├──────────┼───────────────┼─────────────────────┤
+       │perror()  │ Thread safety │ MT-Safe race:stderr │
+       ├──────────────────┼───────────────┼─────────────────────────┤
+       │posix_fallocate() │ Thread safety │ MT-Safe (but see NOTES) │
+       ├─────────────────┼───────────────┼────────────────┤
+       │valloc(),        │ Thread safety │ MT-Unsafe init │
+       │pvalloc()        │               │                │
+       ├────────────────────────┼───────────────┼────────────────┤
+       │printf(), fprintf(),    │ Thread safety │ MT-Safe locale │
+       │sprintf(), snprintf(),  │               │                │
+       │vprintf(), vfprintf(),  │               │                │
+       │vsprintf(), vsnprintf() │               │                │
+       ├──────────┼───────────────┼───────────┤
+       │profil()  │ Thread safety │ MT-Unsafe │
+       ├──────────────────────┼───────────────┼────────────────┤
+       │psignal(), psiginfo() │ Thread safety │ MT-Safe locale │
+       ├────────────┼───────────────┼────────────────────────┤
+       │ptsname()   │ Thread safety │ MT-Unsafe race:ptsname │
+       ├──────────┼───────────────┼─────────────────────┤
+       │putenv()  │ Thread safety │ MT-Unsafe const:env │
+       ├───────────┼───────────────┼────────────────┤
+       │putpwent() │ Thread safety │ MT-Safe locale │
+       ├──────────┼───────────────┼──────────────────────┤
+       │qecvt()   │ Thread safety │ MT-Unsafe race:qecvt │
+       ├──────────┼───────────────┼──────────────────────┤
+       │qfcvt()   │ Thread safety │ MT-Unsafe race:qfcvt │
+       ├──────────┼───────────────┼──────────────────────┤
+       │random_r(), srandom_r(),    │ Thread safety │ MT-Safe race:buf │
+       │initstate_r(), setstate_r() │               │                  │
+       ├────────────────────────────┼───────────────┼────────────────┤
+       │rcmd(), rcmd_af()           │ Thread safety │ MT-Unsafe      │
+       ├────────────────────────────┼───────────────┼────────────────┤
+       │iruserok(), ruserok(),      │ Thread safety │ MT-Safe locale │
+       │iruserok_af(), ruserok_af() │               │                │
+       ├──────────┼───────────────┼──────────────────────────┤
+       │readdir() │ Thread safety │ MT-Unsafe race:dirstream │
+       ├─────────────────────┼───────────────┼───────────┤
+       │re_comp(), re_exec() │ Thread safety │ MT-Unsafe │
+       ├─────────────────────┼───────────────┼────────────────┤
+       │regcomp(), regexec() │ Thread safety │ MT-Safe locale │
+       ├─────────────────────┼───────────────┼────────────────┤
+       │regerror()           │ Thread safety │ MT-Safe env    │
+       ├───────────────────────────────────┼───────────────┼────────────────┤
+       │res_ninit(),         res_nclose(), │ Thread safety │ MT-Safe locale │
+       │res_nquery(),                      │               │                │
+       │res_nsearch(), res_nquerydomain(), │               │                │
+       │res_nsend()                        │               │                │
+       ├────────────────────┼───────────────┼───────────┤
+       │rexec(), rexec_af() │ Thread safety │ MT-Unsafe │
+       ├──────────┼───────────────┼────────────────┤
+       │rpmatch() │ Thread safety │ MT-Safe locale │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │alphasort(), versionsort() │ Thread safety │ MT-Safe locale │
+       ├─────────────────────┼───────────────┼────────────────┤
+       │scanf(), fscanf(),   │ Thread safety │ MT-Safe locale │
+       │sscanf(), vscanf(),  │               │                │
+       │vsscanf(), vfscanf() │               │                │
+       ├────────────────────┼───────────────┼────────────────┤
+       │setaliasent(), en‐  │ Thread safety │ MT-Safe locale │
+       │daliasent(), getal‐ │               │                │
+       │iasent_r(), getal‐  │               │                │
+       │iasbyname_r()       │               │                │
+       ├────────────────────┼───────────────┼────────────────┤
+       │getaliasent(),      │ Thread safety │ MT-Unsafe      │
+       │getaliasbyname()    │               │                │
+       ├──────────────┼───────────────┼─────────────────────┤
+       │setenv(), un‐ │ Thread safety │ MT-Unsafe const:env │
+       │setenv()      │               │                     │
+       ├────────────┼───────────────┼────────────────────────────┤
+       │setlocale() │ Thread safety │ MT-Unsafe const:locale env │
+       ├─────────────┼───────────────┼────────────────────────┤
+       │setlogmask() │ Thread safety │ MT-Unsafe race:LogMask │
+       ├─────────────────┼───────────────┼─────────────────────────┤
+       │setnetgrent(),   │ Thread safety │ MT-Unsafe race:netgrent │
+       │getnetgrent_r(), │               │ locale                  │
+       │innetgr()        │               │                         │
+       ├─────────────────┼───────────────┼─────────────────────────┤
+       │endnetgrent()    │ Thread safety │ MT-Unsafe race:netgrent │
+       ├─────────────────┼───────────────┼─────────────────────────┤
+       │getnetgrent()    │ Thread safety │ MT-Unsafe race:netgrent │
+       │                 │               │ race:netgrentbuf locale │
+       ├─────────────────────────┼───────────────┼────────────────┤
+       │shm_open(), shm_unlink() │ Thread safety │ MT-Safe locale │
+       ├───────────────┼───────────────┼─────────────────────────┤
+       │siginterrupt() │ Thread safety │ MT-Unsafe const:sigintr │
+       ├──────────┼───────────────┼─────────────────────────────┤
+       │sleep()   │ Thread safety │ MT-Unsafe sig:SIGCHLD/linux │
+       ├──────────────────────┼───────────────┼─────────────────┤
+       │va_arg()              │ Thread safety │ MT-Safe race:ap │
+       ├─────────────────────────────┼───────────────┼─────────────────────┤
+       │__fbufsize(), __fpending(),  │ Thread safety │ MT-Safe race:stream │
+       │__fpurge(), __fsetlocking()  │               │                     │
+       ├─────────────────────────────┼───────────────┼─────────────────────┤
+       │strcasecmp(), strncasecmp() │ Thread safety │ MT-Safe locale │
+       ├──────────┼───────────────┼────────────────┤
+       │strcoll() │ Thread safety │ MT-Safe locale │
+       ├──────────────────────────┼───────────────┼─────────────────────┤
+       │strerror()         │ Thread safety │ MT-Unsafe race:strerror │
+       ├────────────┼───────────────┼────────────────┤
+       │strfmon()   │ Thread safety │ MT-Safe locale │
+       ├────────────┼──────────────────────────────────┼────────────────┤
+       │            │ Thread safety                    │ MT-Safe locale │
+       │strfromd(), ├──────────────────────────────────┼────────────────┤
+       │strfromf(), │ Asynchronous signal safety       │ AS-Unsafe heap │
+       │strfroml()  ├──────────────────────────────────┼────────────────┤
+       │            │ Asynchronous cancellation safety │ AC-Unsafe mem  │
+       ├───────────┼───────────────┼────────────────────┤
+       │strftime() │ Thread safety │ MT-Safe env locale │
+       ├───────────┼───────────────┼────────────────────┤
+       │strptime() │ Thread safety │ MT-Safe env locale │
+       ├───────────────┼───────────────┼─────────────────────────────────┤
+       │strsignal()    │ Thread safety │ MT-Unsafe race:strsignal locale │
+       ├─────────────┼───────────────┼────────────────┤
+       │strcasestr() │ Thread safety │ MT-Safe locale │
+       ├──────────────────────────────┼───────────────┼────────────────┤
+       │strtod(), strtof(), strtold() │ Thread safety │ MT-Safe locale │
+       ├─────────────────────────┼───────────────┼────────────────┤
+       │strtoimax(), strtoumax() │ Thread safety │ MT-Safe locale │
+       ├───────────┼───────────────┼───────────────────────┤
+       │strtok()   │ Thread safety │ MT-Unsafe race:strtok │
+       ├──────────────────────────────┼───────────────┼────────────────┤
+       │strtol(), strtoll(), strtoq() │ Thread safety │ MT-Safe locale │
+       ├─────────────────────────────────┼───────────────┼────────────────┤
+       │strtoul(), strtoull(), strtouq() │ Thread safety │ MT-Safe locale │
+       ├──────────┼───────────────┼────────────────┤
+       │strxfrm() │ Thread safety │ MT-Safe locale │
+       ├──────────┼───────────────┼─────────────┤
+       │sysconf() │ Thread safety │ MT-Safe env │
+       ├──────────────────────┼───────────────┼────────────────────┤
+       │syslog(), vsyslog()   │ Thread safety │ MT-Safe env locale │
+       ├──────────┼───────────────┼─────────────┤
+       │tempnam() │ Thread safety │ MT-Safe env │
+       ├──────────────────────┼───────────────┼────────────────────┤
+       │timelocal(), timegm() │ Thread safety │ MT-Safe env locale │
+       ├───────────┼───────────────┼──────────────────────────┤
+       │tmpnam()   │ Thread safety │ MT-Unsafe race:tmpnam/!s │
+       ├─────────────┼───────────────┼────────────────┤
+       │towlower()   │ Thread safety │ MT-Safe locale │
+       ├─────────────┼───────────────┼────────────────┤
+       │towupper()   │ Thread safety │ MT-Safe locale │
+       ├────────────────────┼───────────────┼────────────────────┤
+       │tsearch(), tfind(), │ Thread safety │ MT-Safe race:rootp │
+       │tdelete()           │               │                    │
+       ├────────────────────┼───────────────┼────────────────────┤
+       │twalk()             │ Thread safety │ MT-Safe race:root  │
+       ├────────────────────┼───────────────┼────────────────────┤
+       │twalk_r()           │ Thread safety │ MT-Safe race:root  │
+       ├────────────┼───────────────┼────────────────────────┤
+       │ttyname()   │ Thread safety │ MT-Unsafe race:ttyname │
+       ├──────────┼───────────────┼───────────┤
+       │ttyslot() │ Thread safety │ MT-Unsafe │
+       ├──────────┼───────────────┼────────────────────┤
+       │tzset()   │ Thread safety │ MT-Safe env locale │
+       ├─────────────────────┼───────────────┼───────────────────────┤
+       │getc_unlocked(),     │ Thread safety │ MT-Safe race:stream   │
+       │putc_unlocked(),     │               │                       │
+       │clearerr_unlocked(), │               │                       │
+       │fflush_unlocked(),   │               │                       │
+       │fgetc_unlocked(),    │               │                       │
+       │fputc_unlocked(),    │               │                       │
+       │fread_unlocked(),    │               │                       │
+       │fwrite_unlocked(),   │               │                       │
+       │fgets_unlocked(),    │               │                       │
+       │fputs_unlocked(),    │               │                       │
+       │getwc_unlocked(),    │               │                       │
+       │fgetwc_unlocked(),   │               │                       │
+       │fputwc_unlocked(),   │               │                       │
+       │putwc_unlocked(),    │               │                       │
+       │fgetws_unlocked(),   │               │                       │
+       │fputws_unlocked()    │               │                       │
+       ├─────────────────────┼───────────────┼───────────────────────┤
+       │getchar_unlocked(),  │ Thread safety │ MT-Unsafe race:stdin  │
+       │getwchar_unlocked()  │               │                       │
+       ├─────────────────────┼───────────────┼───────────────────────┤
+       │putchar_unlocked(),  │ Thread safety │ MT-Unsafe race:stdout │
+       │putwchar_unlocked()  │               │                       │
+       ├───────────┼───────────────┼──────────────────────────┤
+       │updwtmp(), │ Thread safety │ MT-Unsafe sig:ALRM timer │
+       │logwtmp()  │               │                          │
+       ├──────────┼───────────────┼────────────────────────────┤
+       │wcrtomb() │ Thread safety │ MT-Unsafe race:wcrtomb/!ps │
+       ├─────────────┼───────────────┼────────────────┤
+       │wcscasecmp() │ Thread safety │ MT-Safe locale │
+       ├──────────────┼───────────────┼────────────────┤
+       │wcsncasecmp() │ Thread safety │ MT-Safe locale │
+       ├─────────────┼───────────────┼───────────────────────────────┤
+       │wcsnrtombs() │ Thread safety │ MT-Unsafe race:wcsnrtombs/!ps │
+       ├────────────┼───────────────┼──────────────────────────────┤
+       │wcsrtombs() │ Thread safety │ MT-Unsafe race:wcsrtombs/!ps │
+       ├─────────────────────────┼───────────────┼────────────────┤
+       │wcstoimax(), wcstoumax() │ Thread safety │ MT-Safe locale │
+       ├───────────┼───────────────┼────────────────┤
+       │wcswidth() │ Thread safety │ MT-Safe locale │
+       ├──────────┼───────────────┼────────────────┤
+       │wctomb()  │ Thread safety │ MT-Unsafe race │
+       ├──────────┼───────────────┼────────────────┤
+       │wctrans() │ Thread safety │ MT-Safe locale │
+       ├──────────┼───────────────┼────────────────┤
+       │wctype()  │ Thread safety │ MT-Safe locale │
+       ├──────────┼───────────────┼────────────────┤
+       │wcwidth() │ Thread safety │ MT-Safe locale │
+       ├───────────┼───────────────┼────────────────────────────────┤
+       │wordexp()  │ Thread safety │ MT-Unsafe race:utent const:env │
+       │           │               │ env sig:ALRM timer locale      │
+       ├─────────────────────────┼───────────────┼────────────────┤
+       │wprintf(), fwprintf(),   │ Thread safety │ MT-Safe locale │
+       │swprintf(), vwprintf(),  │               │                │
+       │vfwprintf(), vswprintf() │               │                │
+       └─────────────────────────┴───────────────┴────────────────┘
+
+2008/functions/ftw.html cwd
+
+2008/functions/wordexp.html unused Rutent  env loc 
+     */
 /* Locale/thread synchronization macros. */
 #if ! defined(USE_LOCALE_THREADS)   /* No threads, or no locales */ 
 #  define LOCALE_LOCK_(cond)  NOOP
