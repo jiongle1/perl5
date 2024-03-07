@@ -7480,6 +7480,7 @@ typedef struct am_table_short AMTS;
 #  define LOCALE_INIT           PERL_RW_MUTEX_INIT(&PL_locale_mutex)
 #  define LOCALE_TERM           STMT_START {                                  \
                                     LOCALE_TERM_POSIX_2008_;                  \
+                                    LOCALE_TERM_THREAD_SAFE_LOCALE_EMULATION_;\
                                     PERL_RW_MUTEX_DESTROY(&PL_locale_mutex);  \
                                 } STMT_END
 #  if 0
