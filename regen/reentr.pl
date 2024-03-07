@@ -1216,7 +1216,109 @@ read_only_bottom_close_and_rename($c);
 #       strtok_r
 
 # The meanings of the flags are derivable from %map above
-# Fnc, arg flags| hdr   | ? struct type | prototypes...
+
+# There are also two mutex columns.  They give what mutexes should be invoked
+# so as to prevent the function from interfering with other threads.  The
+# first is for when the non-reentrant function is called; and the second for
+# the reentrant version.  The values were gleaned by looking at the POSIX
+# Standard and the ATTRIBUTES section of the glibc man pages for the
+# functions.  In many cases the Standard says a function is thread safe, but the
+# glibc says they are only so if the locale and environment aren't changed
+# during their execution.   The Standard says
+
+#   A thread-safe function can be safely invoked concurrently with other calls
+#   to the same function, or with calls to any other thread-safe functions, by
+#   multiple threads. Each function defined in the System Interfaces volume of
+#   POSIX.1-2017 is thread-safe unless explicitly stated otherwise. Examples
+#   are any 'pure' function, a function which holds a mutex locked while it is
+#   accessing static storage, or objects shared among threads.
+#
+# If you read that carefully, it implies that any non-thread-safe function,
+# even completely unrelated ones, executed by another thread can render your
+# thread's allegedly thread-safe function unsafe.  Changing the locale or
+# environment are unsafe, so maybe glibc is technically in compliance.
+#
+# So the implementations here are based on the more restrictive glibc ones.
+# khw hopes that there aren't other platforms with more restrictive needs.
+# But if a platform required further restrictions, the table could be modified
+# to make all platforms share the most restrictive version.  For some of the
+# functions, the reentrant version is a GNU extension, with some other
+# platforms offering similar extensions.
+
+# XXX It could well be that the thread-safe uselocale() that changes the
+# locale doesn't render these functions non-thread safe, so a future direction
+# would be to check that out, and change things accordingly.
+#
+# Each mutex column may contain 3 single-capital-letter flags, possibly
+# appended with lowercase modifiers.  The meanings of two of the flags are:
+#
+#   E   involves the Env mutex 
+#   L   involves the Locale mutex 
+#
+# It so happens that these are the only two mutexes any of these functions are
+# involved in.  For these two, the capital letter must have one of two
+# lowercase suffixes:
+#
+#   r   The function is affected by changes given by the type of the mutex,
+#       but doesn't itself make any changes.  Hence, a read-only mutex
+#       suffices to prevent cross thread interference.
+#   w   The function actually makes changes that would affect other threads
+#       using this mutex type, so an exclusive (writer) mutex is required
+#
+# The third flag, R, if present, indicates that there is a potential race
+# (inherent in the function) with other threads.  The R flag may stand alone,
+# or be followed by a sequence of lower case letters, which together form a
+# name.  If it stands alone, the function has a potential race with just
+# itself being called in another thread.  It also may return its value in a
+# global static buffer, or be affected by signals, but those details don't
+# affect how we handle things, so there is no need to include them in the
+# table below.
+#
+# If R is followed by a name, it means there is a potential race with other
+# functions which also are tagged by the same name in the table.  The special
+# name 'l' as in 'Rl' indicates that the race is related to locales; otherwise
+# it uses the default described in the next paragraph.
+
+# It would be most efficient if a separate mutex was created for each entry
+# that has an R flag, except those that share the same R tag would be grouped
+# together in one mutex.  But that isn't done currently, for two reasons:
+#  1)   khw believes that these are rarely enough called that they can share a
+#       mutex without slowing down a process noticeably.  And there is an
+#       existing mutex that khw also believes isn't used much, and so that is
+#       pressed into service as the default for all of them.  If this turns
+#       out to be wrong, mutexes could be created for any subset(s) of them.
+#  2)   But the fewer mutexes there are, the less likely there is for
+#       deadlock.  If you acquire mutex A and somebody else acquires mutex B
+#       and then you need B; and they need A, you have deadlock.  But if A and
+#       B are collapsed into just A; there is no possibility of deadlock.
+#       (The locale and environment mutexes are the only ones perl is likely to
+#       use together, and the possibility of deadlock is minimized by using
+#       special macros to lock both, constructed so that locale is always
+#       locked first, and the code is constructed so that the the locale is never attempted to be while 
+#       And almost all calls 
+#
+# Macros that define the appropriate locks are defined, but it is up to the
+# user of the functions to include them in code.  There is too much variance
+# in how these might be used for the code to try to guess what to do.  What
+# this does do though, is to #define the appropriate macro that does the
+# correct locking around a call, so that the coder doesn't have to know if the
+# reentrant version is used or not.
+#
+# Many of the functions open a database.  In actuality, the entire transaction
+# through the corresponding closing of the database should be in one
+# critical section.  But if this is long, it could keep other threads from
+# executing.  Some of that could be fixed by making a separate mutex for them.
+# But still many rely on the environment and/or locale not changing during the
+# operation, so would lock out writers to those.
+#
+# The word "Copy" in the reentrant mutex column indicates that its value is to
+# be set to the same as that of the non-reentrant column.  This was used when
+# glibc doesn't have a reentrant version, and khw didn't dig further to find
+# one, so just used the non-reentrant values, as certainly the reentrant
+# version isn't going to be more strict than the non-reentrant one.  Thus
+# there is less certainty about these values; patches welcome
+#
+# Fnc, arg flags| hdr   | ? struct type |standard mutex | _r mutex  | prototypes...
 __DATA__
 asctime S	|time	|const struct tm|B_SB|B_SBI|I_SB|I_SBI
 crypt CC	|crypt	|struct crypt_data|B_CCS|B_CCD|D=CRYPTD*
