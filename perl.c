@@ -1665,6 +1665,7 @@ dup_environ(pTHX)
 
     size_t n_entries = 0, vars_size = 0;
 
+    //ENV_READ_LOCK;
     ENV_LOCK;
     for (char **ep = environ; *ep; ++ep) {
         ++n_entries;
