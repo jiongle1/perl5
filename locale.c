@@ -422,15 +422,15 @@ static int debug_initialization = 0;
 #define PERL_IN_LOCALE_C
 #include "perl.h"
 
+#define gwLOCALE_LOCK    LOCALE_LOCK_(0)
+#define gwLOCALE_UNLOCK  LOCALE_UNLOCK_
+
 /* Some platforms require LC_CTYPE to be congruent with the category we are
  * looking for.  XXX This still presumes that we have to match COLLATE and
  * CTYPE even on platforms that apparently handle this. */
 #if defined(USE_LOCALE_CTYPE) && ! defined(LIBC_HANDLES_MISMATCHED_CTYPE)
 #  define WE_MUST_DEAL_WITH_MISMATCHED_CTYPE    /* no longer used; kept for
                                                    possible future use */
-
-#define gwLOCALE_LOCK    LOCALE_LOCK_(0)
-#define gwLOCALE_UNLOCK  LOCALE_UNLOCK_
 
 #  define start_DEALING_WITH_MISMATCHED_CTYPE(locale)                          \
         const char * orig_CTYPE_locale = toggle_locale_c(LC_CTYPE, locale)
