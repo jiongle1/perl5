@@ -7392,16 +7392,21 @@ typedef struct am_table_short AMTS;
 
 /* setlocale() generally returns in a global static buffer, but not on Windows
  * when operating in thread-safe mode */
-#define WSETLOCALE_LOCK                                                     \
+#ifdef USE_THREADS
+#  define WSETLOCALE_LOCK                                                   \
             STMT_START {                                                    \
                 if (_configthreadlocale(0) == _DISABLE_PER_THREAD_LOCALE)   \
                     gwLOCALE_LOCK;                                          \
             } STMT_END
-#define WSETLOCALE_UNLOCK                                                   \
+#  define WSETLOCALE_UNLOCK                                                 \
             STMT_START {                                                    \
                 if (_configthreadlocale(0) == _DISABLE_PER_THREAD_LOCALE)   \
                     gwLOCALE_UNLOCK;                                        \
             } STMT_END
+#else
+#  define WSETLOCALE_LOCK    NOOP
+#  define WSETLOCALE_UNLOCK  NOOP
+#endif
 
 /* End of locale/env synchronization */
 
