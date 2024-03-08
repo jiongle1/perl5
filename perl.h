@@ -7325,15 +7325,21 @@ typedef struct am_table_short AMTS;
                                                  ENVr_UNLOCK_;              \
                                     } STMT_END
 #    define gwENVr_LCr_LOCK_(cat)   STMT_START {                            \
+                                                 ENVr_LOCK_;                \
+                                                 LOCALE_LOCK_(0);           \
+                                    } STMT_END
+#    define gwENVr_LCr_UNLOCK_(cat) STMT_START {                            \
+                                                 LOCALE_UNLOCK_;            \
+                                                 ENVr_UNLOCK_;              \
+                                    } STMT_END
+#    define gwENVw_LCr_LOCK_(cat)   STMT_START {                            \
                                                  ENVw_LOCK_;                \
                                                  LCr_LOCK_(cat);            \
                                     } STMT_END
-#    define gwENVr_LCr_UNLOCK_(cat) STMT_START {                            \
+#    define gwENVw_LCr_UNLOCK_(cat) STMT_START {                            \
                                                  LCr_UNLOCK_(cat);          \
                                                  ENVw_UNLOCK_;              \
                                     } STMT_END
-#    define gwENVw_LCr_LOCK_(cat)   gwENVr_LCr_LOCK_(cat)
-#    define gwENVw_LCr_UNLOCK_(cat) gwENVr_LCr_UNLOCK_(cat)
 #    define gwLCr_LOCK_(cat)        LOCALE_LOCK_(0)
 #    define gwLCr_UNLOCK_(cat)      LOCALE_UNLOCK_
 #    define LCr_LOCK_(cat)          LOCALE_READ_LOCK
