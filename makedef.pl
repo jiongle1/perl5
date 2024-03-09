@@ -426,9 +426,12 @@ unless ($define{'USE_ITHREADS'}) {
 		    PL_regex_padav
 		    PL_dollarzero_mutex
 		    PL_env_mutex
-		    PL_hints_mutex
+                    PL_env_mutex_depth
+                    PL_env_mutex_readers
+                    PL_hints_mutex
 		    PL_locale_mutex
 		    PL_locale_mutex_depth
+		    PL_locale_mutex_readers
 		    PL_my_ctx_mutex
 		    PL_perlio_mutex
 		    PL_stashpad

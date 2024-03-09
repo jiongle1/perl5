@@ -6403,51 +6403,159 @@ EXTCONST U8   PL_deBruijn_bitpos_tab64[];
 #ifdef WIN32
     /* Windows mutexes are all general semaphores; we don't currently bother
      * with reproducing the same panic behavior as on other systems */
-#  define PERL_REENTRANT_LOCK(name, mutex, counter,                         \
+#  define PERL_REENTRANT_LOCK(name, mutex, wcounter,                         \
                               cond_to_panic_if_already_locked)              \
         PERL_WRITE_LOCK(mutex)
-#  define PERL_REENTRANT_UNLOCK(name, mutex, counter)  PERL_WRITE_UNLOCK(mutex)
+#  define PERL_REENTRANT_UNLOCK(name, mutex, wcounter, rcounter)        \
+       PERL_WRITE_UNLOCK(mutex)
 #else
 
     /* Simulate a general (or recursive) semaphore on 'mutex' whose name will
-     * be displayed as 'name' in any messages.  There must be a per-thread
-     * variable 'counter', initialized to 0 upon thread creation that this
+     * be displayed as 'name' in any messages.  A lock may be exclusive (for
+     * writing), or non-exclusive (for reading).  An attempt to acquire a
+     * write-lock will hang until all extant read-locks are cleared.
+     *
+     * A thread that has a read-lock can change to having a write-lock.  It
+     * will hang until all other threads have released their read-locks.
+     * When the thread releases its write-lock, it will still have its read-
+     * lock.
+     *
+     * The way it works is that there are two counters, each initialized to 0
+     * upon thread creation. 'wcounter' counts the depth of write-locks on the
+     * mutex, and 'rcounter' counts the depth of read-locks.  There is also a
+     * field in the mutex structure whose value is the number of read-locks on
+     * that mutex.
+     *
+     * There are several cases:
+     *
+     * a) request read-lock without owning a write-lock; other readers is
+     *    irrelevant:
+     *      The thread locks the mutex briefly.  If another thread has a lock
+     *      on the mutex, the system will block this thread until that is
+     *      released.  Then the reader-locks field of the mutex structure is
+     *      incremented and the mutex lock is released.
+     *
+     *      rcounter is incremented.  It is irrelevant to this case if this
+     *      thread has other read-locks on this mutex.
+     *
+     *      Note, only one thread at a time operates on that field.  Read-locks
+     *      are very quick: acquire mutex, increment, release.  Write-locks
+     *      keep the mutex for however long is needed to complete their task.
+     *
+     * b) write-lock, no read-locks, nor other write-lock
+     *      The thread locks the mutex and increments wcounter.  If the
+     *      system's mutex lock is binary, the system will block this thread
+     *      until the existing lock is released.  Otherwise the system does
+     *      whatever acccounting it needs for a recursive lock.
+     *
+     *      wcounter is set to 1.
+     *
+     * c) write-lock, owns another write-lock, read-locks irrelevant;
+     *      The value of wcounter is the number of nested write-locks this
+     *      thread owns, and will be non-zero.  It is simply incremented,
+     *      without attempting to lock the mutex (which would hang forever if
+     *      the mutex is a binary one).
+     *
+     * d) read-lock, owns a write-lock; other readers is irrelevant
+     *      wcounter will be non-zero. The readers-count field in the
+     *      already-owned mutex struct is simply incremented, without trying to
+     *      lock the mutex. rcounter is neither inspected nor changed in this
+     *      case.
+     *
+     * e) write-lock, owns at least one read-lock, no other write-lock:
+     *      rcounter will be non-zero, and wcounter will be zero.  The thread
+     *      attempts to acquire the mutex, which will block until any other
+     *      writer has finished.  If the readers-count field in the mutex is
+     *      the same as rcounter, then we know that all those readers are from
+     *      this thread, and wcounter is set to 1.
+     *
+     *      Otherwise, the thread loops, using the methods furnished by the
+     *      system to be woken up when a reader relinquishes the mutex, and
+     *      testing again to see if it is only this thread has readers on this
+     *      mutex.
+     *
+     * Note that if wcounter is non-zero, rcounter is irrelevant; if a new
+     * read-lock/unlock request comes in, the mutex struct readers-count is
+     * changed, and not rcounter.  Thus the depth of read-locks at any given
+     * time is the sum of rcounter and the mutex struct field.  rcounter
+     * matters when wcounter is zero; and the struct field matters when
+     * wcounter is non-zero.
+     *
+     * When a thread requests a read lock without owning a write lock, the
+     * mutex is locked briefly
+     * There must be a per-thread
+     * variable 'wcounter', initialized to 0 upon thread creation that this
      * macro otherwise controls and keeps set to the recursion depth of the
      * mutex.  'cond_to_panic_if_already_locked' should be set to '0' for a
      * fully reentrant semaphore.  Otherwise set it to a bit of code which will
      * be evaluated if the macro is called recursively.  If it evaluates to
      * 'true', it means something is seriously wrong, and the process panics.
      *
-     * It locks the mutex if the 'counter' is zero, and then increments
-     * 'counter'.  Each corresponding UNLOCK decrements 'counter' until it is
+     * It locks the mutex if the 'wcounter' is zero, and then increments
+     * 'wcounter'.  Each corresponding UNLOCK decrements 'wcounter' until it is
      * 0, at which point it actually unlocks the mutex.  Since the variable is
      * per-thread, initialized to 0, there is no race with other threads.
      *
      * Clang improperly gives warnings for this, if not silenced:
      * https://clang.llvm.org/docs/ThreadSafetyAnalysis.html#conditional-locks
      */
-#  define PERL_REENTRANT_LOCK(name, mutex, counter,                         \
+#  define PERL_REENTRANT_LOCK(name, mutex, wcounter, rcounter,                         \
                               cond_to_panic_if_already_locked)              \
     STMT_START {                                                            \
         CLANG_DIAG_IGNORE(-Wthread-safety)                                  \
-        if (LIKELY(counter <= 0)) {                                         \
+        if (LIKELY(wcounter <= 0)) {                                         \
+            assert(wcounter == 0);                                  \
             UNLESS_PERL_MEM_LOG(DEBUG_Lv(PerlIO_printf(Perl_debug_log,      \
-                                "%s: %d: locking " name "; lock depth=1\n", \
-                                __FILE__, __LINE__));                       \
+                                "%s: %d: locking " name "; lock depth=1"    \
+                                "reader_count=%d\n",                        \
+                                __FILE__, __LINE__, rcounter));       \
             )                                                               \
-            PERL_WRITE_LOCK(mutex);                                         \
-            counter = 1;                                                    \
+                                                                            \
+            /* If this thread has no read-locks on this mutex, it is a      \
+             * simple write lock */                                         \
+            if (LIKELY(rcounter <= 0)) {                                \
+                if(rcounter < 0) PerlIO_printf(Perl_debug_log, "rcounter=%d\n", rcounter);                        \
+                \
+                assert(rcounter == 0);                                  \
+                PERL_WRITE_LOCK(mutex);                                     \
+            }                                                               \
+            else {                                                          \
+                /* Here, this thread effectively already owns at least one  \
+                 * read-lock on\
+                 * this mutex.  Hence, there are no writers; so this lock   \
+                 * request should succeed quickly, delayed only by any      \
+                 * concurrent lock requests; the read-ones will quickly     \
+                 * unlock, and the write ones will quickly fail. */         \
+                DEBUG_Lv(PerlIO_printf(Perl_debug_log, "acquiring mutex for " name "\n"));\
+                MUTEX_LOCK(&(mutex)->lock);                                 \
+                DEBUG_Lv(PerlIO_printf(Perl_debug_log, "mutex acquired for " name "\n"));\
+                                                                            \
+                DEBUG_Lv(PerlIO_printf(Perl_debug_log, "new readers_count is %zd\n", (mutex)->readers_count));\
+                                                                        \
+                /* Wait until we are the only reader */ \
+                do {                                                        \
+                    if ((mutex)->readers_count <= rcounter) {                  \
+                        DEBUG_Lv(PerlIO_printf(Perl_debug_log, "should be ready to go\n"));\
+                        break;                                              \
+                    }                                                       \
+                        DEBUG_Lv(PerlIO_printf(Perl_debug_log, "waiting for another reader to wake us up\n"));\
+                    COND_WAIT(&(mutex)->wakeup, &(mutex)->lock);            \
+                }                                                           \
+                while (1);                                                  \
+            }                                                               \
+                                                                            \
+            wcounter = 1;                                                    \
             UNLESS_PERL_MEM_LOG(DEBUG_Lv(PerlIO_printf(Perl_debug_log,      \
                                 "%s: %d: " name " locked; lock depth=1\n",  \
                                 __FILE__, __LINE__));                       \
             )                                                               \
         }                                                                   \
         else {                                                              \
-            counter++;                                                      \
+            wcounter++;                                                      \
             UNLESS_PERL_MEM_LOG(DEBUG_Lv(PerlIO_printf(Perl_debug_log,      \
                             "%s: %d: avoided locking " name "; new lock"    \
                             " depth=%d, but will panic if '%s' is true\n",  \
-                            __FILE__, __LINE__, counter,                    \
+                            __FILE__, __LINE__, wcounter,                    \
                             STRINGIFY(cond_to_panic_if_already_locked)));   \
             )                                                               \
             if (cond_to_panic_if_already_locked) {                          \
@@ -6460,10 +6568,10 @@ EXTCONST U8   PL_deBruijn_bitpos_tab64[];
         CLANG_DIAG_RESTORE                                                  \
     } STMT_END
 
-#  define PERL_REENTRANT_READ_LOCK(name, mutex, counter)                    \
+#  define PERL_REENTRANT_READ_LOCK(name, mutex, wcounter, rcounter)                    \
     STMT_START {                                                            \
         CLANG_DIAG_IGNORE(-Wthread-safety)                                  \
-        if (LIKELY(counter <= 0)) {                                         \
+        if (LIKELY(wcounter <= 0)) {                                         \
             UNLESS_PERL_MEM_LOG(DEBUG_Lv(PerlIO_printf(Perl_debug_log,      \
                                 "%s: %d: read locking " name "\n",          \
                                 __FILE__, __LINE__));                       \
@@ -6473,6 +6581,7 @@ EXTCONST U8   PL_deBruijn_bitpos_tab64[];
                                 "%s: %d: " name " read locked\n",           \
                                 __FILE__, __LINE__));                       \
             )                                                               \
+            (rcounter)++; \
         }                                                                   \
         else {                                                              \
             /* This thread already has a write lock on this mutex.  Just    \
@@ -6485,35 +6594,35 @@ EXTCONST U8   PL_deBruijn_bitpos_tab64[];
         CLANG_DIAG_RESTORE                                                  \
     } STMT_END
 
-#  define PERL_REENTRANT_UNLOCK(name, mutex, counter)                       \
+#  define PERL_REENTRANT_UNLOCK(name, mutex, wcounter, rcounter)         \
     STMT_START {                                                            \
-        if (LIKELY(counter == 1)) {                                         \
+        if (LIKELY(wcounter == 1)) {                                         \
             UNLESS_PERL_MEM_LOG(DEBUG_Lv(PerlIO_printf(Perl_debug_log,      \
                           "%s: %d: unlocking " name "; new lock depth=0\n", \
                           __FILE__, __LINE__));                             \
             )                                                               \
-            counter = 0;                                                    \
+            wcounter = 0;                                                    \
             PERL_WRITE_UNLOCK(mutex);                                       \
         }                                                                   \
-        else if (counter <= 0) {                                            \
+        else if (wcounter <= 0) {                                            \
             Perl_croak_nocontext("panic: %s: %d: attempting to unlock"      \
                                  " already unlocked " name "; depth was"    \
                                  " %d\n", __FILE__, __LINE__,               \
-                                 counter);                                  \
+                                 wcounter);                                  \
         }                                                                   \
         else {                                                              \
-            counter--;                                                      \
+            wcounter--;                                                      \
             UNLESS_PERL_MEM_LOG(DEBUG_Lv(PerlIO_printf(Perl_debug_log,      \
                 "%s: %d: avoided unlocking " name "; new lock depth=%d\n",  \
-                __FILE__, __LINE__, counter));                              \
+                __FILE__, __LINE__, wcounter));                              \
             )                                                               \
         }                                                                   \
     } STMT_END
 
-#  define PERL_REENTRANT_READ_UNLOCK(name, mutex, counter)                  \
+#  define PERL_REENTRANT_READ_UNLOCK(name, mutex, wcounter, rcounter)                  \
     STMT_START {                                                            \
         CLANG_DIAG_IGNORE(-Wthread-safety)                                  \
-        if (LIKELY(counter <= 0)) {                                         \
+        if (LIKELY(wcounter <= 0)) {                                         \
             UNLESS_PERL_MEM_LOG(DEBUG_Lv(PerlIO_printf(Perl_debug_log,      \
                                 "%s: %d: read unlocking " name "\n",        \
                                 __FILE__, __LINE__));                       \
@@ -6523,6 +6632,7 @@ EXTCONST U8   PL_deBruijn_bitpos_tab64[];
                                 "%s: %d: " name " read unlocked\n",         \
                                 __FILE__, __LINE__));                       \
             )                                                               \
+            (rcounter)--; \
         }                                                                   \
         else if (LIKELY((mutex)->readers_count > 0)) {                      \
             /* This thread already has a write lock on this mutex.  Just    \
@@ -6534,7 +6644,7 @@ EXTCONST U8   PL_deBruijn_bitpos_tab64[];
         }                                                                   \
         else {                                                              \
             Perl_croak_nocontext("panic: %s: %d: attempting to read unlock" \
-                                 " already unlocked " name "; counter was"  \
+                                 " already unlocked " name "; wcounter was"  \
                                  " %zd\n", __FILE__, __LINE__,              \
                                  (mutex)->readers_count);                   \
         }                                                                   \
@@ -7123,10 +7233,12 @@ typedef struct am_table_short AMTS;
 #  define ENV_LOCK            PERL_REENTRANT_LOCK("env",                    \
                                                   &PL_env_mutex,            \
                                                   PL_env_mutex_depth,       \
+                                                  PL_env_mutex_readers,     \
                                                   1);
 #  define ENV_UNLOCK          PERL_REENTRANT_UNLOCK("env",                  \
                                                     &PL_env_mutex,          \
-                                                    PL_env_mutex_depth)
+                                                    PL_env_mutex_depth,     \
+                                                    PL_env_mutex_readers)
 #  define CONVERT_ENV_READ_LOCK_TO_WRITE                                    \
                               PERL_CONVERT_READ_LOCK_TO_WRITE(&PL_env_mutex)
 #  if 0
@@ -7142,10 +7254,12 @@ typedef struct am_table_short AMTS;
                     PERL_CONVERT_UNNESTED_READ_LOCK_TO_WRITE(&PL_env_mutex)
 #  define ENV_READ_LOCK       PERL_REENTRANT_READ_LOCK("env",               \
                                                        &PL_env_mutex,       \
-                                                       PL_env_mutex_depth)
+                                                       PL_env_mutex_depth,\
+                                                       PL_env_mutex_readers)
 #  define ENV_READ_UNLOCK     PERL_REENTRANT_READ_UNLOCK("env",             \
                                                          &PL_env_mutex,     \
-                                                         PL_env_mutex_depth)
+                                                         PL_env_mutex_depth,\
+                                                         PL_env_mutex_readers)
 
 #  define ENV_INIT            PERL_RW_MUTEX_INIT(&PL_env_mutex)
 #  define ENV_TERM            PERL_RW_MUTEX_DESTROY(&PL_env_mutex)
@@ -7269,21 +7383,27 @@ typedef struct am_table_short AMTS;
 #  define LOCALE_LOCK_(cond_to_panic_if_already_locked)                     \
        STMT_START {                                                         \
            PERL_REENTRANT_LOCK("locale",                                    \
-                               &PL_locale_mutex, PL_locale_mutex_depth,     \
+                               &PL_locale_mutex,                            \
+                               PL_locale_mutex_depth,                       \
+                               PL_locale_mutex_readers,                     \
                                cond_to_panic_if_already_locked);            \
        } STMT_END
 #  define LOCALE_UNLOCK_                                                    \
        STMT_START {                                                         \
            PERL_REENTRANT_UNLOCK("locale",                                  \
-                                 &PL_locale_mutex, PL_locale_mutex_depth);  \
+                                 &PL_locale_mutex,                          \
+                                 PL_locale_mutex_depth,                     \
+                                 PL_locale_mutex_readers);                  \
        } STMT_END
 
 #  define LOCALE_READ_LOCK    PERL_REENTRANT_READ_LOCK("locale",            \
                                                       &PL_locale_mutex,     \
-                                                      PL_locale_mutex_depth)
+                                                      PL_locale_mutex_depth,\
+                                                      PL_locale_mutex_readers)
 #  define LOCALE_READ_UNLOCK  PERL_REENTRANT_READ_UNLOCK("locale",          \
                                                       &PL_locale_mutex,     \
-                                                      PL_locale_mutex_depth)
+                                                      PL_locale_mutex_depth, \
+                                                      PL_locale_mutex_readers)
 
 #  ifdef USE_THREAD_SAFE_LOCALE
      /* Because any changes to the locale are for just this thread, no locking
