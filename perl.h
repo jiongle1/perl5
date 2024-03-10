@@ -7300,7 +7300,6 @@ typedef struct am_table_short AMTS;
     * time won't destroy ours before we have copied the result safely away and
     * unlocked the mutex.  On such platforms (which is most), we can have many
     * readers of the environment at the same time. */
-#if 0
 #  ifdef GETENV_PRESERVES_OTHER_THREAD
 #    define GETENV_LOCK    ENV_READ_LOCK
 #    define GETENV_UNLOCK  ENV_READ_UNLOCK
@@ -7310,7 +7309,6 @@ typedef struct am_table_short AMTS;
 #    define GETENV_LOCK    ENV_LOCK
 #    define GETENV_UNLOCK  ENV_UNLOCK
 #  endif
-#endif
 #else
 #  define ENV_LOCK        NOOP
 #  define ENV_UNLOCK      NOOP
@@ -7507,16 +7505,18 @@ typedef struct am_table_short AMTS;
       * write lock, as everything is done in the global locale, so we can't
       * have another thread changing it, and this thread may well have to
       * toggle the locale */
-#    define ENVr_LCr_LOCK_(cat)     LOCK_i_(cat##_INDEX_)
-#    define ENVr_LCr_UNLOCK_(cat)   UNLOCK_i_(cat##_INDEX_)
-#    define ENVr_LCw_LOCK_(cat)     LOCK_i_(cat##_INDEX_)
-#    define ENVr_LCw_UNLOCK_(cat)   UNLOCK_i_(cat##_INDEX_)
-#    define gwENVr_LCr_LOCK_(cat)   LOCK_i_(cat##_INDEX_)
-#    define gwENVr_LCr_UNLOCK_(cat) UNLOCK_i_(cat##_INDEX_)
-#    define LCr_LOCK_(cat)          LOCK_i_(cat##_INDEX_)
-#    define LCr_UNLOCK_(cat)        UNLOCK_i_(cat##_INDEX_)
-#    define TSE_TOGGLE(cat)         LOCK_i_(cat##_INDEX_)
-#    define TSE_UNTOGGLE(cat)       UNLOCK_i_(cat##_INDEX_)
+#    define ENVr_LCr_LOCK_(cat)     LC_LOCK_i_(cat##_INDEX_)
+#    define ENVr_LCr_UNLOCK_(cat)   LC_UNLOCK_i_(cat##_INDEX_)
+#    define ENVr_LCw_LOCK_(cat)     LC_LOCK_i_(cat##_INDEX_)
+#    define ENVr_LCw_UNLOCK_(cat)   LC_UNLOCK_i_(cat##_INDEX_)
+#    define gwENVr_LCr_LOCK_(cat)   LC_LOCK_i_(cat##_INDEX_)
+#    define gwENVr_LCr_UNLOCK_(cat) LC_UNLOCK_i_(cat##_INDEX_)
+#    define gwLCr_LOCK_(cat)        LC_LOCK_i_(cat##_INDEX_)
+#    define gwLCr_UNLOCK_(cat)      LC_UNLOCK_i_(cat##_INDEX_)
+#    define LCr_LOCK_(cat)          LC_LOCK_i_(cat##_INDEX_)
+#    define LCr_UNLOCK_(cat)        LC_UNLOCK_i_(cat##_INDEX_)
+#    define TSE_TOGGLE_(cat)        LC_LOCK_i_(cat##_INDEX_)
+#    define TSE_UNTOGGLE_(cat)      LC_UNLOCK_i_(cat##_INDEX_)
 #    define LC_NUMERIC_LOCK(cond_to_panic_if_already_locked)                \
                                     LC_LOCK_i_(LC_NUMERIC_INDEX_)
 #    define LC_NUMERIC_UNLOCK       LC_UNLOCK_i_(LC_NUMERIC_INDEX_)

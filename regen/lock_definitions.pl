@@ -504,8 +504,12 @@ foreach my $function (sort { lc $a cmp lc $b } keys %functions) {
 
         # Ready to output if no locale issues are involved
         if (! $locale_lock && ! $this_data->{categories}) {
-            print $l "#define ${FUNC}_LOCK    ${name}_LOCK_\n";
-            print $l "#define ${FUNC}_UNLOCK  ${name}_UNLOCK_\n";
+            print $l <<~EOT;
+                #ifndef ${FUNC}_LOCK
+                #  define ${FUNC}_LOCK    ${name}_LOCK_
+                #  define ${FUNC}_UNLOCK  ${name}_UNLOCK_
+                #endif
+                EOT
         }
         else {
             my $LOCK;
@@ -525,18 +529,24 @@ foreach my $function (sort { lc $a cmp lc $b } keys %functions) {
                 || $this_data->{categories}->@* > 1
                 || grep { $_ eq 'LC_ALL' } $this_data->{categories}->@*)
             {
-                print $l "#define ${FUNC}_LOCK    ${name}_$LOCK(LC_ALL)\n";
-                print $l "#define ${FUNC}_UNLOCK  ${name}_UN$LOCK(LC_ALL)\n";
+                print $l <<~EOT;
+                    #ifndef ${FUNC}_LOCK
+                    #  define ${FUNC}_LOCK    ${name}_$LOCK(LC_ALL)
+                    #  define ${FUNC}_UNLOCK  ${name}_UN$LOCK(LC_ALL)
+                    #endif
+                    EOT
             }
             else {  # Below, just a single category
                 my $category = $this_data->{categories}[0];
                 print $l <<~EOT;
-                    #ifdef $category
-                    #  define ${FUNC}_LOCK    ${name}_$LOCK($category)
-                    #  define ${FUNC}_UNLOCK  ${name}_UN$LOCK($category)
-                    #else
-                    #  define ${FUNC}_LOCK    ${name}_$LOCK(LC_ALL)
-                    #  define ${FUNC}_UNLOCK  ${name}_UN$LOCK(LC_ALL)
+                    #ifndef ${FUNC}_LOCK
+                    #  ifdef $category
+                    #    define ${FUNC}_LOCK    ${name}_$LOCK($category)
+                    #    define ${FUNC}_UNLOCK  ${name}_UN$LOCK($category)
+                    #  else
+                    #    define ${FUNC}_LOCK    ${name}_$LOCK(LC_ALL)
+                    #    define ${FUNC}_UNLOCK  ${name}_UN$LOCK(LC_ALL)
+                    #  endif
                     #endif
                     EOT
             }

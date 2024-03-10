@@ -2269,7 +2269,7 @@ Perl_category_lock(pTHX_ const UV mask,
     /* The highest set bit needs to correspond to a legal index; LC_ALL_INDEX_
      * is the biggest such one */
     assert(mask != 0);
-    assert((mask & ~(LC_INDEX_TO_BIT_(LC_ALL_INDEX_) - 1)) == 0);
+    assert((mask & ~(LC_INDEX_TO_BIT_(LC_ALL_INDEX_ + 1) - 1)) == 0);
 
     dSAVE_ERRNO;
 
@@ -2298,7 +2298,7 @@ Perl_category_lock(pTHX_ const UV mask,
      * the mask to all ones for the individual categories.  This works because
      * LC_ALL_INDEX_ is 1 greater than the highest individual category index,
      * and they are all consecutive */
-    if (UNLIKELY(working_mask & LC_INDEX_TO_BIT_(LC_ALL_INDEX_))) {
+    if (working_mask & LC_INDEX_TO_BIT_(LC_ALL_INDEX_)) {
         working_mask = LC_INDEX_TO_BIT_(LC_ALL_INDEX_) - 1;
     }
 
@@ -2451,7 +2451,7 @@ Perl_category_unlock(pTHX_ const UV mask,
 {
     PERL_ARGS_ASSERT_CATEGORY_UNLOCK;
     assert(mask != 0);
-    assert((mask & ~(LC_INDEX_TO_BIT_(LC_ALL_INDEX_) - 1)) == 0);
+    assert((mask & ~(LC_INDEX_TO_BIT_(LC_ALL_INDEX_ + 1) - 1)) == 0);
 
     /* Undoes a matching category_lock().  Note that must be locked on input.
      * Will unlock when recursion entirely gets unwound */
@@ -2476,7 +2476,7 @@ Perl_category_unlock(pTHX_ const UV mask,
                           ", called from %s: %d\n", mask, file, caller_line));
 
     unsigned int working_mask = mask;
-    if (UNLIKELY(working_mask & LC_INDEX_TO_BIT_(LC_ALL_INDEX_))) {
+    if (working_mask & LC_INDEX_TO_BIT_(LC_ALL_INDEX_)) {
         working_mask = LC_INDEX_TO_BIT_(LC_ALL_INDEX_) - 1;
     }
 
