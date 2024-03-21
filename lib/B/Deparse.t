@@ -3396,3 +3396,7 @@ $x //= exit 42;
 my $x = __LINE__;
 my $y = __FILE__;
 my $z = __PACKAGE__;
+####
+use feature 'state';
+state sub FOO :prototype() { 42 }
+print(FOO, "\n");
